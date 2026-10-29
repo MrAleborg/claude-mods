@@ -51,7 +51,8 @@ const tree = (paths: string[], closed: string[]): TreeRow[] => {
       if (!node.dirs.has(d)) node.dirs.set(d, { dirs: new Map(), files: [] })
       node = node.dirs.get(d)!
     }
-    node.files.push(parts[parts.length - 1])
+    // an untracked nested repo comes as "sub/": a folder row, no nameless file
+    if (parts[parts.length - 1]) node.files.push(parts[parts.length - 1])
   }
   const rows: TreeRow[] = []
   const walk = (node: Node, prefix: string, depth: number) => {
@@ -105,22 +106,26 @@ const stats = (rows: Row[]) => ({
 
 const refresh = async ($: any) => {
   const git = (...args: string[]) => $.process.run(['git', ...args])
-  const head = await git('rev-parse', '--abbrev-ref', 'HEAD')
+  // symbolic-ref names the branch even before the first commit; rev-parse covers a detached HEAD
+  let head = await git('symbolic-ref', '--short', 'HEAD')
+  if (head.exitCode !== 0) head = await git('rev-parse', '--abbrev-ref', 'HEAD')
   if (head.exitCode !== 0) {
     await update($, info, () => empty)
     return
   }
-  // shortcut: untracked files are not listed, add `ls-files -o` if wanted
-  const names = await git('diff', 'HEAD', '--name-status')
+  // -z: paths come unquoted, NUL-separated; a rename or copy (R100, C75) carries two paths
+  const names = await git('diff', 'HEAD', '--name-status', '-z')
+  const parts = names.stdout.split('\0').filter(Boolean)
   const files: GitInfo['files'] = []
-  for (const line of names.stdout.split('\n').filter(Boolean)) {
-    const [status, ...rest] = line.split('\t')
-    const path = rest[rest.length - 1]
+  for (let i = 0; i < parts.length; ) {
+    const status = parts[i]
+    i += /^[RC]/.test(status) ? 3 : 2
+    const path = parts[i - 1]
     const d = await git('diff', 'HEAD', '--', path)
     files.push({ path, status, diff: d.stdout.slice(0, MAX_DIFF) })
   }
-  const other = await git('ls-files', '--others', '--exclude-standard')
-  const untracked = other.stdout.split('\n').filter(Boolean).slice(0, MAX_UNTRACKED)
+  const other = await git('ls-files', '--others', '--exclude-standard', '-z')
+  const untracked = other.stdout.split('\0').filter(Boolean).slice(0, MAX_UNTRACKED)
   const log = await git('log', '--graph', '--oneline', '--decorate', '--all', '-n', '40')
   await update($, info, () => ({
     isRepo: true,
