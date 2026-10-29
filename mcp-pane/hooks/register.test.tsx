@@ -33,7 +33,6 @@ test('group splits server from tool, servers holding "__" too', () => {
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`the pane lists servers and expands one to its tools (${surface})`, async ($, on) => {
     on('command.register', () => ({ value: { command: 'mcp-pane' } }))
-    on('clock.sleep', () => ({ value: undefined }))
     on('ui.open', () => ({ value: { isPlaced: true } }))
     on('session.start', (_, e) => ({ cwd: e.cwd }))
     on('tool.list', () => ({ value: TOOLS }))
@@ -51,7 +50,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
 test('no MCP tools: says so', async ($, on) => {
   on('command.register', () => ({ value: { command: 'mcp-pane' } }))
-  on('clock.sleep', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('tool.list', () => ({ value: [TOOLS[0]] }))
   await $.command.run({ command: 'mcp-pane' })

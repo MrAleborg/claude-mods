@@ -24,7 +24,6 @@ const world = (on: any, paths: string[] | null, disk: Record<string, string> = {
   on('fs.read', (_: any, e: any) => (rel(e.path) in disk ? { value: disk[rel(e.path)] } : { deny: 'ENOENT' }))
   on('fs.write', (_: any, e: any) => ((disk[rel(e.path)] = e.text), { value: undefined }))
   on('command.register', () => ({ value: { command: 'file-tree' } }))
-  on('clock.sleep', () => ({ value: undefined }))
   on('ui.open', (_: any, e: any) => (log.opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.close', (_: any, e: any) => (log.closed.push(e.id), { value: undefined }))
   on('ui.toast', (_: any, e: any) => (log.toasts.push(e.text), { value: undefined }))

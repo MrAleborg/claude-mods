@@ -54,7 +54,6 @@ const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
 const engine = (on: any) => {
   const opened: string[] = []
   on('command.register', () => ({ value: { command: 'git-pane' } }))
-  on('clock.sleep', () => ({ value: undefined }))
   on('ui.open', (_: any, e: any) => {
     opened.push(e.id)
     return { value: { isPlaced: true } }
