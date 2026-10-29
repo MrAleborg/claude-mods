@@ -4,6 +4,7 @@
   "plugins": [
     { "name": "git-pane", "source": "./git-pane" },
     { "name": "file-tree", "source": "./file-tree" },
-    { "name": "agent-monitor", "source": "./agent-monitor" }
+    { "name": "agent-monitor", "source": "./agent-monitor" },
+    { "name": "mcp-pane", "source": "./mcp-pane" }
   ]
 }
