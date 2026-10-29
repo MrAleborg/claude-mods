@@ -75,7 +75,7 @@ const owns = (a: AgentRun, s: Step) => (s.owner ? s.owner === a.id || s.owner ==
 const claimed = (plan: Step[], runs: AgentRun[], prev: string[] = []) => {
   const now = treeOf(plan)
     .flatMap(flat)
-    .filter(n => !n.kids.length && n.step.status === 'in_progress' && !runs.some(a => !a.isDone && owns(a, n.step)))
+    .filter(n => !n.kids.length && n.step.status === 'in_progress' && !n.step.owner && !runs.some(a => owns(a, n.step)))
     .map(n => n.step.content)
 
   return [...prev, ...now.filter(c => !prev.includes(c))].slice(-30)
@@ -151,7 +151,9 @@ export const register: Register = on => {
     const { step, status, title } = e as unknown as { step: string; status: Step['status']; title?: string }
     let hit = false
     await update($, steps, old => {
-      const next = old.map(t => (numberOf(t.content) === step ? ((hit = true), { ...t, status }) : t))
+      // A step is found by its number, its Task id, or its title, so a title never adds a second copy of a step.
+      const same = (t: Step) => numberOf(t.content) === step || t.id === step || (!!title && depthOf(t.content).text === depthOf(title).text)
+      const next = old.map(t => (same(t) ? ((hit = true), { ...t, status }) : t))
 
       return hit || !title ? next : [...next, { content: `${step} ${title}`, status }]
     })
@@ -374,7 +376,8 @@ export const register: Register = on => {
     const toneOf = (a: AgentRun) => (a.id === 'main' ? (a.doing ? 'blue' : 'gray') : a.state === 'killed' ? 'gray' : a.state === 'paused' ? 'yellow' : a.isDone ? 'green' : 'blue')
     const mainState = await read($, main)
     const mainRun: AgentRun = { id: 'main', name: 'Main', doing: mainState.doing, tokens: mainState.tokens, cost: mainState.cost, effort: mainState.effort, model: mainState.model, isDone: false }
-    const mainTasks = (mainState.tasks ?? []).filter(c => plan.some(t => t.content === c && !runs.some(a => !a.isDone && owns(a, t))))
+    // A step an agent ever owned (running or done) is listed under that agent alone.
+    const mainTasks = (mainState.tasks ?? []).filter(c => plan.some(t => t.content === c && !t.owner && !runs.some(a => owns(a, t))))
     const kids = (a: AgentRun) => (a.agentId ? runs.filter(c => c.parentId === a.agentId) : [])
     const roots = runs.filter(a => !a.parentId || !runs.some(p => p.agentId === a.parentId))
     // Subagents hang under their parent and show while the parent is open.

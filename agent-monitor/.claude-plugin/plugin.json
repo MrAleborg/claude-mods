@@ -1,1 +1,1 @@
-{ "name": "agent-monitor", "version": "0.2.0", "license": "MIT", "description": "Pane showing running agents and the current plan step", "types": "./types/index.d.ts" }
+{ "name": "agent-monitor", "version": "0.2.1", "license": "MIT", "description": "Pane showing running agents and the current plan step", "types": "./types/index.d.ts" }

@@ -259,6 +259,38 @@ test('agents spawned in parallel get different names and only their own tasks', 
   await ui.unmount()
 })
 
+test('a finished agent keeps its tasks; Main never lists them, and plan_step by id or title adds no copy', async ($, on) => {
+  let n = 0
+  on('tool.call', (_, e) => ({ result: e.tool === 'TaskCreate' ? { task: { id: String(++n) } } : {} }) as any)
+  on('agent.spawn', () => ({ model: 'opus' }) as any)
+  on('classic.SubagentStart', () => ({}) as any)
+  on('classic.SubagentStop', () => ({}) as any)
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Dummy A: count files', description: '' } as any)
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Dummy B: read glossary', description: '' } as any)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' } as any)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '2', status: 'in_progress' } as any)
+  await $.agent.spawn(spawn({ description: 'Dummy A', prompt: 'plan task #1', name: 'Carol', tool_use_id: 'tc' }))
+  await $.classic.SubagentStart({ agent_id: 'a1', agent_type: 'general-purpose' } as any)
+  await $.tool.call({ tool: PLAN_STEP, step: '1', status: 'completed', title: 'Dummy A: count files', agentId: 'a1' } as any)
+  await $.tool.call({ tool: PLAN_STEP, step: '9', status: 'completed', title: 'Dummy B: read glossary' } as any)
+  await $.classic.SubagentStop({ agent_id: 'a1', agent_type: 'general-purpose', stop_hook_active: false, agent_transcript_path: '', last_assistant_message: '' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const rows = (await texts(ui)).map(x => x.trim())
+  const carol = rows.lastIndexOf('▾ ✔ Carol · opus')
+  const main = rows.lastIndexOf('▾ ● Main')
+  // One step each in the plan: no "1 Dummy A" or "9 Dummy B" copy.
+  expect(rows.filter(x => /Dummy A/.test(x) && !/Dummy B/.test(x)).length).toBe(2)
+  expect(rows.some(x => /^\S+ 9 Dummy B/.test(x))).toBe(false)
+  // Dummy A sits under Carol only, even though Carol is done.
+  expect(rows.lastIndexOf('✔ Dummy A: count files')).toBeGreaterThan(carol)
+  expect(main).toBeGreaterThan(0)
+  expect(rows.slice(main, carol).some(x => /Dummy A/.test(x))).toBe(false)
+  expect(rows.slice(main, carol)).toContain('✔ Dummy B: read glossary')
+  await ui.unmount()
+})
+
 test('pressing kill marks the agent killed and stops it with TaskStop', async ($, on) => {
   const stops: unknown[] = []
   on('tool.call', (_, e) => (e.tool === 'TaskStop' && stops.push((e as any).task_id), { result: {} }) as any)
