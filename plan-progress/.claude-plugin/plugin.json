@@ -1,1 +1,0 @@
-{ "name": "plan-progress", "version": "0.1.0", "description": "Band above the prompt showing the current plan's progress", "types": "./types/index.d.ts" }
