@@ -1,0 +1,1 @@
+{ "name": "agent-monitor", "version": "0.1.0", "description": "Pane showing running agents and the current plan step", "types": "./types/index.d.ts" }

@@ -1,0 +1,10 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "Alexandre Le Borgne" },
+  "plugins": [
+    { "name": "git-pane", "source": "./git-pane" },
+    { "name": "file-tree", "source": "./file-tree" },
+    { "name": "agent-monitor", "source": "./agent-monitor" },
+    { "name": "plan-progress", "source": "./plan-progress" }
+  ]
+}
