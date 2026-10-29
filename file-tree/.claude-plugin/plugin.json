@@ -1,1 +1,1 @@
-{ "name": "file-tree", "version": "0.1.0", "description": "File tree pane; selecting a file opens an editor pane", "types": "./types/index.d.ts" }
+{ "name": "file-tree", "version": "0.2.0", "description": "File tree pane; selecting a file opens an editor pane", "types": "./types/index.d.ts" }

@@ -1,1 +1,1 @@
-{ "name": "git-pane", "version": "0.1.0", "description": "Right pane: current branch, per-file diff tabs, expandable git graph", "types": "./types/index.d.ts" }
+{ "name": "git-pane", "version": "0.2.0", "description": "Right pane: current branch, per-file diff tabs, expandable git graph", "types": "./types/index.d.ts" }
