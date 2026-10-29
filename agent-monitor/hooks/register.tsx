@@ -121,10 +121,10 @@ export const register: Register = on => {
     await $.command.register({ name: 'monitor', description: 'Show running agents and plan progress in a pane' })
     await $.tool.register({
       name: 'plan_step',
-      description: 'Set the status of a plan step shown in the agent-monitor pane, by its number (e.g. "1.2").',
+      description: 'Set the status of a plan step shown in the agent-monitor pane, by its number (e.g. "1.2"). Pass title to create the step when it is not in the plan yet.',
       inputSchema: {
         type: 'object',
-        properties: { step: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] } },
+        properties: { step: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] }, title: { type: 'string' } },
         required: ['step', 'status'],
       },
     })
@@ -141,9 +141,14 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'mcp__agent-monitor__plan_step' }, async ($, e) => {
-    const { step, status } = e as unknown as { step: string; status: Step['status'] }
+    const { step, status, title } = e as unknown as { step: string; status: Step['status']; title?: string }
     let hit = false
-    await update($, steps, old => old.map(t => (numberOf(t.content) === step ? ((hit = true), { ...t, status }) : t)))
+    await update($, steps, old => {
+      const next = old.map(t => (numberOf(t.content) === step ? ((hit = true), { ...t, status }) : t))
+
+      return hit || !title ? next : [...next, { content: `${step} ${title}`, status }]
+    })
+    hit ||= !!title
 
     const [plan, runs] = [await read($, steps), await read($, agents)]
     await update($, main, m => ({ ...m, tasks: claimed(plan, runs, m.tasks) }))
@@ -217,7 +222,26 @@ export const register: Register = on => {
       await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, doing, log: [...(a.log ?? []), doing].slice(-30) } : a)))
     }
 
-    return next(e)
+    const out = await next(e)
+    // Task tools change one task at a time and return the id only in the result, so the plan is built from the answered call.
+    // shortcut: Task tasks are flat (no nesting) unless the subject carries "1.2 ..." numbering.
+    const input = e as unknown as { tool: string; taskId?: string; subject?: string; status?: Step['status'] | 'deleted' }
+    const task = (out as { result?: { task?: { id?: string; subject?: string } } }).result?.task
+    if (e.tool === 'TaskCreate' && task?.id) {
+      const step: Step = { id: task.id, content: task.subject ?? input.subject ?? '', status: 'pending' }
+      await update($, steps, old => [...old, step].slice(-100))
+    }
+    if (e.tool === 'TaskUpdate' && input.taskId) {
+      await update($, steps, old =>
+        input.status === 'deleted'
+          ? old.filter(t => t.id !== input.taskId)
+          : old.map(t => (t.id === input.taskId ? { ...t, content: input.subject ?? t.content, status: input.status ?? t.status } as Step : t)),
+      )
+      const [plan, runs] = [await read($, steps), await read($, agents)]
+      await update($, main, m => ({ ...m, tasks: claimed(plan, runs, m.tasks) }))
+    }
+
+    return out
   })
 
   // The classic events carry the transcript path; a subagent's lives beside the session's, under subagents/.
