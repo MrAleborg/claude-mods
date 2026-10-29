@@ -137,8 +137,22 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: EDITOR }, async ($, e) => {
-    const { Box, Text, Client } = $.ui.resolve(e)
     const cur = await read($, edit)
+
+    // vscode and mobile have no Client, so no editor: show the text read-only.
+    if (e.surface === 'vscode' || e.surface === 'mobile') {
+      const { Box, Text, Code } = $.ui.resolve(e)
+      if (cur.path === '') return <Text dimColor>Select a file in the Files pane.</Text>
+
+      return (
+        <Box flexDirection="column">
+          <Text bold>{cur.path}</Text>
+          <Text dimColor>Read-only here: editing needs the terminal or desktop app.</Text>
+          <Code source={cur.saved} path={cur.path} startLine={1} />
+        </Box>
+      )
+    }
+    const { Box, Text, Client } = $.ui.resolve(e)
 
     if (cur.path === '') {
       return <Text dimColor>Select a file in the Files pane.</Text>
