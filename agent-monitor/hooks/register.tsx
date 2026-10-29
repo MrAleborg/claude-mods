@@ -4,7 +4,7 @@ import type { Register } from 'claude-code'
 import type { AgentRun, Step } from '../types'
 
 const PANE = 'agent-monitor'
-const agents = atom({ plugin: 'agent-monitor', key: 'agents' } as const, [], { shape: 'agents-2' })
+const agents = atom({ plugin: 'agent-monitor', key: 'agents' } as const, [], { shape: 'agents-3' })
 const steps = atom({ plugin: 'agent-monitor', key: 'steps' } as const, [], { shape: 'steps-1' })
 
 const folded = atom({ plugin: 'agent-monitor', key: 'folded' } as const, { plan: false, agents: false }, { shape: 'folded-1' })
@@ -33,8 +33,12 @@ const depthOf = (c: string) => {
   return { depth: Math.max(Math.floor(m[1].length / 2), m[2] ? m[2].split('.').length - 1 : 0), text: m[3] }
 }
 
-// "Step 1.2 ..." or "[1.2] ..." in an agent's description or prompt names the plan step it works on.
-const stepRef = (text: string) => /(?:\bstep\s*|^\s*\[)(\d+(?:\.\d+)*)/i.exec(text)?.[1]
+// "Step 1.2 ..." or "[1.2] ..." in an agent's description or prompt names the plan step it works on;
+// once "task" is said, every "#6" names a task too ("plan tasks #6, #7 and #8").
+const stepRefs = (text: string) => [
+  ...[...text.matchAll(/(?:\bsteps?\s*|\btasks?\s*#?|^\s*\[)(\d+(?:\.\d+)*)/gim)].map(m => m[1] as string),
+  ...(/\btasks?\b/i.test(text) ? [...text.matchAll(/#(\d+)\b/g)].map(m => m[1] as string) : []),
+]
 const numberOf = (c: string) => /^ *(\d+(?:\.\d+)*)[.)]?\s/.exec(c)?.[1]
 
 const treeOf = (steps: Step[]) => {
@@ -64,11 +68,14 @@ const blockers = (c: string) => /\bblocked by\b([^)\n]*)/i.exec(c)?.[1].match(/\
 
 const main = atom({ plugin: 'agent-monitor', key: 'main' } as const, {}, { shape: 'main-2' })
 
+// A step with an owner (TaskUpdate: agent id or name) is that agent's alone; else it is the step the agent was spawned on.
+const owns = (a: AgentRun, s: Step) => (s.owner ? s.owner === a.id || s.owner === a.agentId || s.owner === a.name : a.task === s.content)
+
 // The main session's tasks: steps in progress that no running agent has, remembered so finished ones stay listed.
 const claimed = (plan: Step[], runs: AgentRun[], prev: string[] = []) => {
   const now = treeOf(plan)
     .flatMap(flat)
-    .filter(n => !n.kids.length && n.step.status === 'in_progress' && !runs.some(a => !a.isDone && a.task === n.step.content))
+    .filter(n => !n.kids.length && n.step.status === 'in_progress' && !runs.some(a => !a.isDone && owns(a, n.step)))
     .map(n => n.step.content)
 
   return [...prev, ...now.filter(c => !prev.includes(c))].slice(-30)
@@ -179,22 +186,31 @@ export const register: Register = on => {
 
   // The Agent tool returns at launch for background agents, so completion comes from the subagent events.
   on('agent.spawn', async ($, e, next) => {
-    // The step named by number in the description or prompt; else the first step in progress at spawn (a guess).
+    // Steps named by number (or Task id) in the description or prompt; else the first step in progress at spawn (a guess).
     const plan = await read($, steps)
-    const ref = stepRef(e.description) ?? stepRef(e.prompt)
-    const task = (ref ? plan.find(t => numberOf(t.content) === ref) : undefined)?.content ?? plan.find(t => t.status === 'in_progress')?.content
+    const refs = new Set([...stepRefs(e.description), ...stepRefs(e.prompt)])
+    const named = plan.filter(t => refs.has(numberOf(t.content) ?? '') || (!!t.id && refs.has(t.id)))
+    const task = named[0]?.content ?? plan.find(t => t.status === 'in_progress' && !t.owner)?.content
     // tool_use_id can be empty for a resumed run; every Button needs a non-empty key.
     // An unnamed agent gets a random first name, one not already on the list while any are left.
-    const used = new Set((await read($, agents)).map(a => a.name))
-    const free = NAMES.filter(n => !used.has(n))
-    const pool = free.length ? free : NAMES
-    const name = e.name ?? `${pool[Math.floor(Math.random() * pool.length)]}${free.length ? '' : `-${used.size}`}`
+    const id = e.tool_use_id || `spawn-${await $.clock.now()}`
     // Assigning an agent starts its step, so the Assigned section picks it up.
-    if (task) {
-      await update($, steps, old => old.map(t => (t.content === task && t.status === 'pending' ? { ...t, status: 'in_progress' as const } : t)))
-    }
-    const run: AgentRun = { model: e.model ?? e.parentModel, id: e.tool_use_id || `spawn-${await $.clock.now()}`, name, desc: e.description, task, parentId: e.parentAgentId, isDone: false }
-    await update($, agents, list => [...list, run].slice(-50))
+    // A step the agent was given by name becomes its own (unless already owned); a guessed one stays unowned.
+    const owned = new Set(named.map(t => t.content))
+    const given = new Set([...owned, ...(task ? [task] : [])])
+    await update($, steps, old =>
+      old.map(t => (given.has(t.content) ? { ...t, owner: owned.has(t.content) ? t.owner ?? id : t.owner, status: t.status === 'pending' ? 'in_progress' as const : t.status } : t)),
+    )
+    // The name is picked inside the update, so parallel spawns (retried on a version clash) never share one.
+    await update($, agents, list => {
+      const used = new Set(list.map(a => a.name))
+      const free = NAMES.filter(n => !used.has(n))
+      const pool = free.length ? free : NAMES
+      const name = e.name ?? `${pool[Math.floor(Math.random() * pool.length)]}${free.length ? '' : `-${used.size}`}`
+      const run: AgentRun = { model: e.model ?? e.parentModel, id, name, desc: e.description, task, parentId: e.parentAgentId, isDone: false }
+
+      return [...list, run].slice(-50)
+    })
 
     return next(e)
   })
@@ -219,13 +235,16 @@ export const register: Register = on => {
 
     if (e.agentId) {
       const doing = gist(e)
-      await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, doing, log: [...(a.log ?? []), doing].slice(-30) } : a)))
+      // Each call is filed under the step the agent is on: its first owned step not yet completed.
+      const plan = await read($, steps)
+      const onTask = (a: AgentRun) => plan.find(t => owns(a, t) && t.status !== 'completed')?.content ?? a.task
+      await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, doing, log: [...(a.log ?? []), { task: onTask(a), line: doing }].slice(-30) } : a)))
     }
 
     const out = await next(e)
     // Task tools change one task at a time and return the id only in the result, so the plan is built from the answered call.
     // shortcut: Task tasks are flat (no nesting) unless the subject carries "1.2 ..." numbering.
-    const input = e as unknown as { tool: string; taskId?: string; subject?: string; status?: Step['status'] | 'deleted' }
+    const input = e as unknown as { tool: string; taskId?: string; subject?: string; owner?: string; status?: Step['status'] | 'deleted' }
     const task = (out as { result?: { task?: { id?: string; subject?: string } } }).result?.task
     if (e.tool === 'TaskCreate' && task?.id) {
       const step: Step = { id: task.id, content: task.subject ?? input.subject ?? '', status: 'pending' }
@@ -235,7 +254,7 @@ export const register: Register = on => {
       await update($, steps, old =>
         input.status === 'deleted'
           ? old.filter(t => t.id !== input.taskId)
-          : old.map(t => (t.id === input.taskId ? { ...t, content: input.subject ?? t.content, status: input.status ?? t.status } as Step : t)),
+          : old.map(t => (t.id === input.taskId ? { ...t, content: input.subject ?? t.content, owner: input.owner ?? t.owner, status: input.status ?? t.status } as Step : t)),
       )
       const [plan, runs] = [await read($, steps), await read($, agents)]
       await update($, main, m => ({ ...m, tasks: claimed(plan, runs, m.tasks) }))
@@ -279,7 +298,7 @@ export const register: Register = on => {
     const list = await read($, agents)
     const done = list.find(a => a.agentId === e.agent_id)
     if (done?.state !== 'killed' && done?.task && !list.some(a => !a.isDone && a.task === done.task)) {
-      await update($, steps, old => old.map(t => (t.content === done.task ? { ...t, status: 'completed' as const } : t)))
+      await update($, steps, old => old.map(t => (t.content === done.task && owns(done, t) ? { ...t, status: 'completed' as const } : t)))
     }
 
     return next(e)
@@ -313,8 +332,8 @@ export const register: Register = on => {
     const live = runs.filter(a => !a.isDone)
     // Assigned = steps a running agent has, or that Main has (in progress, no agent); empty when nobody is on any.
     const liveMain = claimed(plan, runs)
-    const whoHas = (c: string) => [...runs.filter(a => !a.isDone && a.task === c).map(a => a.name), ...(liveMain.includes(c) ? ['Main'] : [])]
-    const now = treeOf(plan).flatMap(flat).filter(n => whoHas(n.step.content).length > 0)
+    const whoHas = (s: Step) => [...runs.filter(a => !a.isDone && owns(a, s)).map(a => a.name), ...(liveMain.includes(s.content) ? ['Main'] : [])]
+    const now = treeOf(plan).flatMap(flat).filter(n => n.step.status !== 'completed' && whoHas(n.step).length > 0)
 
     const status = (n: Node) => (n.kids.length && leaves(n).every(x => x === 'completed') ? 'completed' : n.step.status)
     const byNum = new Map(treeOf(plan).flatMap(flat).map(n => [numberOf(n.step.content), n] as const))
@@ -355,7 +374,7 @@ export const register: Register = on => {
     const toneOf = (a: AgentRun) => (a.id === 'main' ? (a.doing ? 'blue' : 'gray') : a.state === 'killed' ? 'gray' : a.state === 'paused' ? 'yellow' : a.isDone ? 'green' : 'blue')
     const mainState = await read($, main)
     const mainRun: AgentRun = { id: 'main', name: 'Main', doing: mainState.doing, tokens: mainState.tokens, cost: mainState.cost, effort: mainState.effort, model: mainState.model, isDone: false }
-    const mainTasks = (mainState.tasks ?? []).filter(c => plan.some(t => t.content === c) && !runs.some(a => !a.isDone && a.task === c))
+    const mainTasks = (mainState.tasks ?? []).filter(c => plan.some(t => t.content === c && !runs.some(a => !a.isDone && owns(a, t))))
     const kids = (a: AgentRun) => (a.agentId ? runs.filter(c => c.parentId === a.agentId) : [])
     const roots = runs.filter(a => !a.parentId || !runs.some(p => p.agentId === a.parentId))
     // Subagents hang under their parent and show while the parent is open.
@@ -367,7 +386,8 @@ export const register: Register = on => {
       const log = isMain ? [] : a.log ?? []
       // Agents open one level by default: the task shows, its commands stay folded.
       const isOpen = open[a.id] ?? true
-      const tasks = isMain ? mainTasks : a.task ? [a.task] : []
+      const owned = plan.filter(t => owns(a, t)).map(t => t.content)
+      const tasks = isMain ? mainTasks : owned.length || !a.task ? owned : [a.task]
       const skills = a.skills ?? []
       const hasMore = tasks.length > 0 || log.length > 0 || sub.length > 0 || skills.length > 0
 
@@ -378,7 +398,7 @@ export const register: Register = on => {
             onPress={() => update($, opened, o => ({ ...o, [a.id]: !(o[a.id] ?? true) }))}
           >
             <Text color={tone} strikethrough={a.state === 'killed'}>
-              {`${pad}  ${hasMore ? (isOpen ? '▾' : '▸') : ' '} ${a.isDone ? '✔' : isMain && !a.doing ? '○' : '●'} ${a.name}${a.desc ? ` · ${a.desc}` : ''}${sub.length ? ` (+${sub.length})` : ''}${a.model ? ` · ${a.model}${a.effort ? ` (${a.effort})` : ''}` : ''}${a.tokens ? ` · ${kilo(a.tokens)} tok` : ''}${a.cost ? ` · ~${usd(a.cost)}` : ''}`}
+              {`${pad}  ${hasMore ? (isOpen ? '▾' : '▸') : ' '} ${a.isDone ? '✔' : isMain && !a.doing ? '○' : '●'} ${a.name}${a.model ? ` · ${a.model}${a.effort ? ` (${a.effort})` : ''}` : ''}${a.tokens ? ` · ${kilo(a.tokens)} tok` : ''}`}
             </Text>
           </Button>
           {a.agentId && !a.isDone && (
@@ -388,16 +408,24 @@ export const register: Register = on => {
           {!isMain && <Button plain key={`rm-${a.id}`} label=" ✕" onPress={() => update($, agents, l => l.filter(x => x.id !== a.id))} />}
         </Box>,
         ...(isOpen && skills.length ? [<Text dimColor>{`${pad}      ⚙ ${skills.join(', ')}`}</Text>] : []),
-        ...(isOpen ? tasks.map((task, i) => (
-          <Button plain
-            key={`task-${a.id}-${i}`}
-            label={`${pad}    ${i === 0 && log.length ? (open[`t-${a.id}`] ? '▾' : '▸') : ' '} ${a.isDone || plan.some(t => t.content === task && t.status === 'completed') ? '✔' : '☰'} ${task}`}
-            onPress={() => update($, opened, o => ({ ...o, [`t-${a.id}`]: !o[`t-${a.id}`] }))}
-          />
-        )) : []),
+        ...(isOpen ? tasks.flatMap((task, i) => {
+          // Each task folds its own calls; calls filed under no listed task show under the agent.
+          const mine = log.filter(l => l.task === task)
+          const k = `t-${a.id}-${i}`
+          const done = (a.isDone && task === a.task) || plan.some(t => t.content === task && t.status === 'completed')
+
+          return [
+            <Button plain
+              key={`task-${a.id}-${i}`}
+              label={`${pad}    ${mine.length ? (open[k] ? '▾' : '▸') : ' '} ${done ? '✔' : '☰'} ${task}`}
+              onPress={() => update($, opened, o => ({ ...o, [k]: !o[k] }))}
+            />,
+            ...(open[k] ? mine.map(l => <Text dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>) : []),
+          ]
+        }) : []),
         ...(a.doing && !a.isDone ? [<Text dimColor>{`${pad}        ↳ ${a.doing}`}</Text>] : []),
-        ...(isOpen && (tasks.length === 0 || open[`t-${a.id}`]) ? log.map((l, i, all) => (
-          <Text dimColor>{`${pad}        ${a.isDone || i < all.length - 1 ? '✔' : '…'} ${l}`}</Text>
+        ...(isOpen ? log.filter(l => !l.task || !tasks.includes(l.task)).map(l => (
+          <Text dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>
         )) : []),
         ...(isOpen ? sub.flatMap(c => row(c, depth + 1)) : []),
       ]
@@ -416,7 +444,7 @@ export const register: Register = on => {
         : []),
       ...(open.assigned ? [] : now.flatMap(n => [
         <Text color="green">{`    ▶ ${n.text}`}</Text>,
-        ...whoHas(n.step.content).map(name => <Text dimColor>{`        ● ${name}`}</Text>),
+        ...whoHas(n.step).map(name => <Text dimColor>{`        ● ${name}`}</Text>),
       ])),
       ...(plan.length === 0 ? [<Text dimColor>  no todo list yet</Text>] : []),
       ...treeOf(plan).flatMap((n, i) => node(n, String(i), 0)),

@@ -1,5 +1,5 @@
-export type AgentRun = { id: string; name: string; desc?: string; agentId?: string; doing?: string; task?: string; log?: string[]; parentId?: string; skills?: string[]; tokens?: number; cost?: number; model?: string; effort?: string; state?: 'paused' | 'killed'; isDone: boolean }
-export type Step = { id?: string; content: string; status: 'pending' | 'in_progress' | 'completed' }
+export type AgentRun = { id: string; name: string; desc?: string; agentId?: string; doing?: string; task?: string; log?: { task?: string; line: string }[]; parentId?: string; skills?: string[]; tokens?: number; cost?: number; model?: string; effort?: string; state?: 'paused' | 'killed'; isDone: boolean }
+export type Step = { id?: string; owner?: string; content: string; status: 'pending' | 'in_progress' | 'completed' }
 
 declare module 'claude-code' {
   interface PluginState {
