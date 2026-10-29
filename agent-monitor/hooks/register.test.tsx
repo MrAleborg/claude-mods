@@ -291,6 +291,23 @@ test('a finished agent keeps its tasks; Main never lists them, and plan_step by 
   await ui.unmount()
 })
 
+test('plan_step with a title that already has its number does not number it twice', async ($, on) => {
+  on('tool.call', () => ({ result: {} }) as any)
+  await $.tool.call({ tool: PLAN_STEP, step: '1', status: 'in_progress', title: '1. Dummy mod test' } as any)
+  await $.tool.call({ tool: PLAN_STEP, step: '1.1', status: 'pending', title: '1.1 Touch files' } as any)
+  await $.tool.call({ tool: PLAN_STEP, step: '1.2', status: 'pending', title: 'Agent A' } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const rows = (await texts(ui)).map(x => x.trim())
+  expect(rows.some(x => x.startsWith('▾ ▶ Dummy mod test (0/2)'))).toBe(true)
+  expect(rows).toContain('○ Touch files')
+  expect(rows).toContain('○ Agent A')
+  expect(rows.some(x => /1\.1 Touch|1\. Dummy/.test(x))).toBe(false)
+  // Main had step 1 before it got substeps; a parent is not a task.
+  expect(rows.some(x => /Dummy mod test/.test(x) && !x.includes('(0/2)'))).toBe(false)
+  await ui.unmount()
+})
+
 test('pressing kill marks the agent killed and stops it with TaskStop', async ($, on) => {
   const stops: unknown[] = []
   on('tool.call', (_, e) => (e.tool === 'TaskStop' && stops.push((e as any).task_id), { result: {} }) as any)

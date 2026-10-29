@@ -155,7 +155,8 @@ export const register: Register = on => {
       const same = (t: Step) => numberOf(t.content) === step || t.id === step || (!!title && depthOf(t.content).text === depthOf(title).text)
       const next = old.map(t => (same(t) ? ((hit = true), { ...t, status }) : t))
 
-      return hit || !title ? next : [...next, { content: `${step} ${title}`, status }]
+      // A title may already carry its number ("1.1 Touch files", "1. Build"); it is not added twice.
+      return hit || !title ? next : [...next, { content: numberOf(title) === step ? title : `${step} ${title}`, status }]
     })
     hit ||= !!title
 
@@ -377,7 +378,9 @@ export const register: Register = on => {
     const mainState = await read($, main)
     const mainRun: AgentRun = { id: 'main', name: 'Main', doing: mainState.doing, tokens: mainState.tokens, cost: mainState.cost, effort: mainState.effort, model: mainState.model, isDone: false }
     // A step an agent ever owned (running or done) is listed under that agent alone.
-    const mainTasks = (mainState.tasks ?? []).filter(c => plan.some(t => t.content === c && !t.owner && !runs.some(a => owns(a, t))))
+    // Only leaf steps: a step remembered before it had substeps is a parent now.
+    const leafSteps = new Set(treeOf(plan).flatMap(flat).filter(n => !n.kids.length).map(n => n.step.content))
+    const mainTasks = (mainState.tasks ?? []).filter(c => leafSteps.has(c) && plan.some(t => t.content === c && !t.owner && !runs.some(a => owns(a, t))))
     const kids = (a: AgentRun) => (a.agentId ? runs.filter(c => c.parentId === a.agentId) : [])
     const roots = runs.filter(a => !a.parentId || !runs.some(p => p.agentId === a.parentId))
     // Subagents hang under their parent and show while the parent is open.
