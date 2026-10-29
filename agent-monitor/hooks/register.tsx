@@ -16,6 +16,11 @@ const gist = (e: Record<string, unknown>) => {
   return `${String(e.tool)} ${String(arg).replace(/\s+/g, ' ').slice(0, 60)}`.trim()
 }
 
+// Each section is its own box: a height in rows and a scroll offset, adjusted by the +/- buttons and the wheel.
+const view = atom({ plugin: 'agent-monitor', key: 'view' } as const, { planRows: 10, agentsRows: 12, planOff: 0, agentsOff: 0 }, { shape: 'view-1' })
+// Line counts of the two boxes as last drawn; read by the scroll hook, so a plain variable (no redraw).
+const lens = { plan: 0, agents: 0 }
+
 const opened = atom({ plugin: 'agent-monitor', key: 'opened' } as const, {}, { shape: 'opened-1' })
 
 type Node = { step: Step; text: string; kids: Node[] }
@@ -68,6 +73,46 @@ const claimed = (plan: Step[], runs: AgentRun[], prev: string[] = []) => {
 
   return [...prev, ...now.filter(c => !prev.includes(c))].slice(-30)
 }
+
+// USD per million tokens (input, output) by model family; cache reads cost 0.1x input, cache writes 1.25x.
+// shortcut: assumed list prices matched by name, not read from the engine; check them against your plan and edit here.
+const RATES: [RegExp, number, number][] = [[/opus/i, 15, 75], [/sonnet|fable/i, 3, 15], [/haiku/i, 1, 5]]
+
+// An agent's session: size (the last response's tokens), model, and estimated cost (every response, priced by its own model), from its transcript.
+// shortcut: a transcript over 4 MiB cannot be read, so its values stay at the last read; messages are told apart by id, so a repeated line counts once.
+const sessionOf = async ($: any, path: string): Promise<{ tokens: number; model?: string; cost: number } | undefined> => {
+  try {
+    const text: string = await $.fs.read(path)
+    const seen = new Set<string>()
+    let tokens = 0
+    let model: string | undefined
+    let cost = 0
+    for (const line of text.split('\n')) {
+      const at = line.indexOf('"usage":{')
+      if (at < 0) continue
+      const id = /"id":"(msg_[^"]+)"/.exec(line)?.[1]
+      if (id) {
+        if (seen.has(id)) continue
+        seen.add(id)
+      }
+      const u = line.slice(at, at + 400)
+      const n = (k: string) => Number(new RegExp(`"${k}":(\\d+)`).exec(u)?.[1] ?? 0)
+      const m = /"model":"([^"]+)"/.exec(line)?.[1]
+      const [inp, out, w, r] = [n('input_tokens'), n('output_tokens'), n('cache_creation_input_tokens'), n('cache_read_input_tokens')]
+      const [, pin, pout] = RATES.find(([re]) => m && re.test(m)) ?? [, 0, 0]
+      cost += ((inp + 1.25 * w + 0.1 * r) * pin + out * pout) / 1e6
+      tokens = inp + w + r + out
+      model = m ?? model
+    }
+
+    return tokens ? { tokens, model, cost } : undefined
+  } catch {
+    return undefined
+  }
+}
+const usd = (n: number) => `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`
+const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
+const addSkill = (list: string[] = [], s: string) => [...list.filter(x => x !== s), s].slice(-5)
 
 const MARK = { completed: '✔', in_progress: '▶', pending: '○' } as const
 
@@ -143,7 +188,7 @@ export const register: Register = on => {
     if (task) {
       await update($, steps, old => old.map(t => (t.content === task && t.status === 'pending' ? { ...t, status: 'in_progress' as const } : t)))
     }
-    const run: AgentRun = { id: e.tool_use_id || `spawn-${await $.clock.now()}`, name, desc: e.description, task, parentId: e.parentAgentId, isDone: false }
+    const run: AgentRun = { model: e.model ?? e.parentModel, id: e.tool_use_id || `spawn-${await $.clock.now()}`, name, desc: e.description, task, parentId: e.parentAgentId, isDone: false }
     await update($, agents, list => [...list, run].slice(-50))
 
     return next(e)
@@ -156,15 +201,33 @@ export const register: Register = on => {
       await $.clock.sleep(500, { signal: next.signal })
     }
 
+    const skill = e.tool === 'Skill' ? String((e as unknown as { skill?: string }).skill ?? '') : ''
+    if (skill) {
+      if (e.agentId) await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, skills: addSkill(a.skills, skill) } : a)))
+    }
+
     if (!e.agentId) {
       const doing = gist(e)
       const [plan, runs] = [await read($, steps), await read($, agents)]
-      await update($, main, m => ({ doing, log: [...(m.log ?? []), doing].slice(-30), tasks: claimed(plan, runs, m.tasks) }))
+      await update($, main, m => ({ ...m, doing, tasks: claimed(plan, runs, m.tasks) }))
     }
 
     if (e.agentId) {
       const doing = gist(e)
       await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, doing, log: [...(a.log ?? []), doing].slice(-30) } : a)))
+    }
+
+    return next(e)
+  })
+
+  // The classic events carry the transcript path; a subagent's lives beside the session's, under subagents/.
+  on('classic.PostToolUse', async ($, e, next) => {
+    const path = e.agent_id ? `${e.transcript_path.replace(/\.jsonl$/, '')}/subagents/agent-${e.agent_id}.jsonl` : e.transcript_path
+    const effort = e.effort?.level
+    const ses = await sessionOf($, path)
+    if (ses || effort) {
+      if (e.agent_id) await update($, agents, list => list.map(a => (a.agentId === e.agent_id ? { ...a, ...ses, effort: effort ?? a.effort } : a)))
+      else await update($, main, m => ({ ...m, ...ses, effort: effort ?? m.effort }))
     }
 
     return next(e)
@@ -198,6 +261,25 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // The wheel scrolls the box under the pointer; elsewhere the pane's own window takes it.
+  // shortcut: keys scroll nothing in a box, wheel only; upgrade if a focused box is wanted.
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (!e.pointer) return next(e)
+    const [v, fold] = [await read($, view), await read($, folded)]
+    // Body rows: header, bordered box (h + 2), header, bordered box.
+    const hPlan = Math.min(v.planRows, Math.max(lens.plan, 1))
+    const hAgents = Math.min(v.agentsRows, Math.max(lens.agents, 1))
+    const planEnd = 1 + (fold.plan ? 0 : hPlan + 2)
+    const agentsStart = planEnd + 1
+    const r = e.pointer.row
+    const target = !fold.plan && r >= 1 && r < planEnd ? 'plan' : !fold.agents && r >= agentsStart + 1 && r < agentsStart + 1 + hAgents + 2 ? 'agents' : undefined
+    if (!target) return next(e)
+    const [offKey, len, hh] = target === 'plan' ? ['planOff', lens.plan, hPlan] as const : ['agentsOff', lens.agents, hAgents] as const
+    await update($, view, x => ({ ...x, [offKey]: Math.max(0, Math.min(Math.max(0, len - hh), x[offKey] + e.by)) }))
+
+    return { deny: 'scrolled a box' }
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const [runs, plan] = [await read($, agents), await read($, steps)]
@@ -213,7 +295,7 @@ export const register: Register = on => {
     const status = (n: Node) => (n.kids.length && leaves(n).every(x => x === 'completed') ? 'completed' : n.step.status)
     const byNum = new Map(treeOf(plan).flatMap(flat).map(n => [numberOf(n.step.content), n] as const))
     // Plan nodes are open unless toggled shut.
-    const node = (n: Node, path: string, depth: number): unknown => {
+    const node = (n: Node, path: string, depth: number): unknown[] => {
       const pad = '  '.repeat(depth + 1)
       const st = status(n)
       const refs = blockers(n.step.content)
@@ -224,20 +306,18 @@ export const register: Register = on => {
       const icon = blocked ? '⊘' : MARK[st]
       const key = `pc-${path}`
       if (!n.kids.length) {
-        return <Text dimColor={st === 'completed'} color={blocked ? 'red' : undefined}>{`${pad}  ${icon} ${label}`}</Text>
+        return [<Text dimColor={st === 'completed'} color={blocked ? 'red' : undefined}>{`${pad}  ${icon} ${label}`}</Text>]
       }
       const done = leaves(n).filter(x => x === 'completed').length
 
-      return (
-        <Box flexDirection="column">
-          <Button plain
-            key={key}
-            label={`${pad}${open[key] ? '▸' : '▾'} ${icon} ${label} (${done}/${leaves(n).length})`}
-            onPress={() => update($, opened, o => ({ ...o, [key]: !o[key] }))}
-          />
-          {!open[key] && n.kids.map((k, i) => node(k, `${path}.${i}`, depth + 1))}
-        </Box>
-      )
+      return [
+        <Button plain
+          key={key}
+          label={`${pad}${open[key] ? '▸' : '▾'} ${icon} ${label} (${done}/${leaves(n).length})`}
+          onPress={() => update($, opened, o => ({ ...o, [key]: !o[key] }))}
+        />,
+        ...(open[key] ? [] : n.kids.flatMap((k, i) => node(k, `${path}.${i}`, depth + 1))),
+      ]
     }
 
     const setState = (a: AgentRun, state?: 'paused' | 'killed') =>
@@ -250,78 +330,106 @@ export const register: Register = on => {
     // running blue, paused yellow, done green, killed gray
     const toneOf = (a: AgentRun) => (a.id === 'main' ? (a.doing ? 'blue' : 'gray') : a.state === 'killed' ? 'gray' : a.state === 'paused' ? 'yellow' : a.isDone ? 'green' : 'blue')
     const mainState = await read($, main)
-    const mainRun: AgentRun = { id: 'main', name: 'Main', doing: mainState.doing, log: mainState.log, isDone: false }
+    const mainRun: AgentRun = { id: 'main', name: 'Main', doing: mainState.doing, tokens: mainState.tokens, cost: mainState.cost, effort: mainState.effort, model: mainState.model, isDone: false }
     const mainTasks = (mainState.tasks ?? []).filter(c => plan.some(t => t.content === c) && !runs.some(a => !a.isDone && a.task === c))
     const kids = (a: AgentRun) => (a.agentId ? runs.filter(c => c.parentId === a.agentId) : [])
     const roots = runs.filter(a => !a.parentId || !runs.some(p => p.agentId === a.parentId))
     // Subagents hang under their parent and show while the parent is open.
-    const row = (a: AgentRun, depth: number): unknown => {
+    const row = (a: AgentRun, depth: number): unknown[] => {
       const pad = '  '.repeat(depth)
-      const sub = kids(a)
+      const isMain = a.id === 'main'
+      const sub = isMain ? roots.slice(-10) : kids(a)
       const tone = toneOf(a)
-      const log = a.log ?? []
+      const log = isMain ? [] : a.log ?? []
       // Agents open one level by default: the task shows, its commands stay folded.
       const isOpen = open[a.id] ?? true
-      const isMain = a.id === 'main'
       const tasks = isMain ? mainTasks : a.task ? [a.task] : []
-      const hasMore = tasks.length > 0 || log.length > 0 || sub.length > 0
+      const skills = a.skills ?? []
+      const hasMore = tasks.length > 0 || log.length > 0 || sub.length > 0 || skills.length > 0
+
+      return [
+        <Box>
+          <Button plain
+            key={`agent-${a.id}`}
+            onPress={() => update($, opened, o => ({ ...o, [a.id]: !(o[a.id] ?? true) }))}
+          >
+            <Text color={tone} strikethrough={a.state === 'killed'}>
+              {`${pad}  ${hasMore ? (isOpen ? '▾' : '▸') : ' '} ${a.isDone ? '✔' : isMain && !a.doing ? '○' : '●'} ${a.name}${a.desc ? ` · ${a.desc}` : ''}${sub.length ? ` (+${sub.length})` : ''}${a.model ? ` · ${a.model}${a.effort ? ` (${a.effort})` : ''}` : ''}${a.tokens ? ` · ${kilo(a.tokens)} tok` : ''}${a.cost ? ` · ~${usd(a.cost)}` : ''}`}
+            </Text>
+          </Button>
+          {a.agentId && !a.isDone && (
+            <Button plain key={`pause-${a.id}`} label={a.state === 'paused' ? ' ▶' : ' ‖'} onPress={() => setState(a, a.state === 'paused' ? undefined : 'paused')} />
+          )}
+          {a.agentId && !a.isDone && <Button plain key={`kill-${a.id}`} label=" ■" onPress={() => kill(a)} />}
+          {!isMain && <Button plain key={`rm-${a.id}`} label=" ✕" onPress={() => update($, agents, l => l.filter(x => x.id !== a.id))} />}
+        </Box>,
+        ...(isOpen && skills.length ? [<Text dimColor>{`${pad}      ⚙ ${skills.join(', ')}`}</Text>] : []),
+        ...(isOpen ? tasks.map((task, i) => (
+          <Button plain
+            key={`task-${a.id}-${i}`}
+            label={`${pad}    ${i === 0 && log.length ? (open[`t-${a.id}`] ? '▾' : '▸') : ' '} ${a.isDone || plan.some(t => t.content === task && t.status === 'completed') ? '✔' : '☰'} ${task}`}
+            onPress={() => update($, opened, o => ({ ...o, [`t-${a.id}`]: !o[`t-${a.id}`] }))}
+          />
+        )) : []),
+        ...(a.doing && !a.isDone ? [<Text dimColor>{`${pad}        ↳ ${a.doing}`}</Text>] : []),
+        ...(isOpen && (tasks.length === 0 || open[`t-${a.id}`]) ? log.map((l, i, all) => (
+          <Text dimColor>{`${pad}        ${a.isDone || i < all.length - 1 ? '✔' : '…'} ${l}`}</Text>
+        )) : []),
+        ...(isOpen ? sub.flatMap(c => row(c, depth + 1)) : []),
+      ]
+    }
+
+    const v = await read($, view)
+    const planLines: unknown[] = [
+      ...(now.length > 0
+        ? [
+            <Button plain
+              key="assigned"
+              label={`  ${open.assigned ? '▸' : '▾'} Assigned (${now.length})`}
+              onPress={() => update($, opened, o => ({ ...o, assigned: !o.assigned }))}
+            />,
+          ]
+        : []),
+      ...(open.assigned ? [] : now.flatMap(n => [
+        <Text color="green">{`    ▶ ${n.text}`}</Text>,
+        ...whoHas(n.step.content).map(name => <Text dimColor>{`        ● ${name}`}</Text>),
+      ])),
+      ...(plan.length === 0 ? [<Text dimColor>  no todo list yet</Text>] : []),
+      ...treeOf(plan).flatMap((n, i) => node(n, String(i), 0)),
+    ]
+    const total = (mainState.cost ?? 0) + runs.reduce((t, a) => t + (a.cost ?? 0), 0)
+    const agentLines: unknown[] = row(mainRun, 0)
+    lens.plan = planLines.length
+    lens.agents = agentLines.length
+
+    // A box: header with fold, - and + resize buttons, then a fixed-height window over its lines.
+    const box = (k: 'plan' | 'agents', title: string, lines: unknown[], rows: number, off: number) => {
+      const key = k === 'plan' ? 'planRows' : 'agentsRows'
+      const resize = (d: number) => () => update($, view, x => ({ ...x, [key]: Math.max(3, Math.min(60, x[key] + d)) }))
+      const hh = Math.min(rows, Math.max(lines.length, 1))
+      const start = Math.min(off, Math.max(0, lines.length - hh))
 
       return (
         <Box flexDirection="column">
           <Box>
-            <Button plain
-              key={`agent-${a.id}`}
-              onPress={() => update($, opened, o => ({ ...o, [a.id]: !(o[a.id] ?? true) }))}
-            >
-              <Text color={tone} strikethrough={a.state === 'killed'}>
-                {`${pad}  ${hasMore ? (isOpen ? '▾' : '▸') : ' '} ${a.isDone ? '✔' : isMain && !a.doing ? '○' : '●'} ${a.name}${a.desc ? ` · ${a.desc}` : ''}${sub.length ? ` (+${sub.length})` : ''}`}
-              </Text>
-            </Button>
-            {a.agentId && !a.isDone && (
-              <Button plain key={`pause-${a.id}`} label={a.state === 'paused' ? ' ▶' : ' ‖'} onPress={() => setState(a, a.state === 'paused' ? undefined : 'paused')} />
-            )}
-            {a.agentId && !a.isDone && <Button plain key={`kill-${a.id}`} label=" ■" onPress={() => kill(a)} />}
-            {!isMain && <Button plain key={`rm-${a.id}`} label=" ✕" onPress={() => update($, agents, l => l.filter(x => x.id !== a.id))} />}
+            <Button plain key={k} label={`${fold[k] ? '▸' : '▾'} ${title}`} onPress={toggle(k)} />
+            <Button plain key={`${k}-less`} label=" －" onPress={resize(-3)} />
+            <Button plain key={`${k}-more`} label=" ＋" onPress={resize(3)} />
+            {lines.length > hh && <Text dimColor>{` ${start + 1}-${start + hh}/${lines.length}`}</Text>}
           </Box>
-          {isOpen && tasks.map((task, i) => (
-            <Button plain
-              key={`task-${a.id}-${i}`}
-              label={`${pad}    ${i === 0 && log.length ? (open[`t-${a.id}`] ? '▾' : '▸') : ' '} ${a.isDone || plan.some(t => t.content === task && t.status === 'completed') ? '✔' : '☰'} ${task}`}
-              onPress={() => update($, opened, o => ({ ...o, [`t-${a.id}`]: !o[`t-${a.id}`] }))}
-            />
-          ))}
-          {a.doing && !a.isDone && <Text dimColor>{`${pad}        ↳ ${a.doing}`}</Text>}
-          {isOpen && (tasks.length === 0 || open[`t-${a.id}`]) && log.map((l, i, all) => (
-            <Text dimColor>{`${pad}        ${a.isDone || i < all.length - 1 ? '✔' : '…'} ${l}`}</Text>
-          ))}
-          {isOpen && sub.map(c => row(c, depth + 1))}
+          {!fold[k] && (
+            <Box flexDirection="column" height={hh + 2} overflow="hidden" borderStyle="round" borderDimColor>
+              {lines.slice(start, start + hh)}
+            </Box>
+          )}
         </Box>
       )
     }
 
     return (
       <Box flexDirection="column">
-        <Button plain key="plan" label={`${fold.plan ? '▸' : '▾'} Plan (${plan.filter(s => s.status === 'completed').length}/${plan.length})`} onPress={toggle('plan')} />
-        {now.length > 0 && (
-          <Button plain
-            key="assigned"
-            label={`  ${open.assigned ? '▸' : '▾'} Assigned (${now.length})`}
-            onPress={() => update($, opened, o => ({ ...o, assigned: !o.assigned }))}
-          />
-        )}
-        {!open.assigned && now.map(n => (
-          <Box flexDirection="column">
-            <Text color="green">{`    ▶ ${n.text}`}</Text>
-            {whoHas(n.step.content).map(name => (
-              <Text dimColor>{`        ● ${name}`}</Text>
-            ))}
-          </Box>
-        ))}
-        {!fold.plan && plan.length === 0 && <Text dimColor>  no todo list yet</Text>}
-        {!fold.plan && treeOf(plan).map((n, i) => node(n, String(i), 0))}
-        <Button plain key="agents" label={`${fold.agents ? '▸' : '▾'} Agents (${live.length} running)`} onPress={toggle('agents')} />
-        {!fold.agents && row(mainRun, 0)}
-        {!fold.agents && roots.slice(-10).map(a => row(a, 0))}
+        {box('plan', `Plan (${plan.filter(s => s.status === 'completed').length}/${plan.length})`, planLines, v.planRows, v.planOff)}
+        {box('agents', `Agents (${live.length} running)${total ? ` · run ~${usd(total)}` : ''}`, agentLines, v.agentsRows, v.agentsOff)}
       </Box>
     )
   })
