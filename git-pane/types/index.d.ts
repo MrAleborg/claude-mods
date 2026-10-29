@@ -6,6 +6,11 @@ export type GitInfo = {
   graph: string
 }
 
+export type Issues = {
+  isAvailable: boolean
+  items: { number: number; title: string; labels: string[] }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'git-pane': {
@@ -16,6 +21,8 @@ declare module 'claude-code' {
       collapsed: Shaped<string[]>
       preview: Shaped<{ path: string; text: string }>
       isGraphOpen: Shaped<boolean>
+      issues: Shaped<Issues>
+      isIssuesOpen: Shaped<boolean>
     }
   }
 }

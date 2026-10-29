@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { GitInfo } from '../types'
+import type { GitInfo, Issues } from '../types'
 
 const PANE = 'git-pane'
 const empty: GitInfo = { isRepo: false, branch: '', files: [], untracked: [], graph: '' }
@@ -33,6 +33,16 @@ const isGraphOpen = atom(
   { plugin: 'git-pane', key: 'isGraphOpen' } as const,
   false,
   { shape: 'graph-1' },
+)
+const issues = atom(
+  { plugin: 'git-pane', key: 'issues' } as const,
+  { isAvailable: false, items: [] } as Issues,
+  { shape: 'issues-1' },
+)
+const isIssuesOpen = atom(
+  { plugin: 'git-pane', key: 'isIssuesOpen' } as const,
+  true,
+  { shape: 'issues-open-1' },
 )
 
 const MAX_DIFF = 20000
@@ -136,14 +146,31 @@ const refresh = async ($: any) => {
   }))
 }
 
+// Open GitHub issues via gh; kept out of refresh since it hits the network.
+const refreshIssues = async ($: any) => {
+  const r = await $.process.run(['gh', 'issue', 'list', '--json', 'number,title,labels', '--limit', '30'])
+  let items: Issues['items'] = []
+  try {
+    if (r.exitCode === 0) {
+      items = JSON.parse(r.stdout).map((i: any) => ({
+        number: i.number,
+        title: i.title,
+        labels: i.labels.map((l: any) => l.name),
+      }))
+    }
+  } catch {}
+  await update($, issues, () => ({ isAvailable: r.exitCode === 0, items }))
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'git-pane',
-      description: 'Show branch, diffs and git graph in a pane',
+      description: 'Show branch, diffs, git graph and issues in a pane',
     })
     void $.ui.open({ id: PANE, title: 'Git' })
     await refresh($)
+    void refreshIssues($).catch(() => {})
 
     return next(e)
   })
@@ -151,6 +178,7 @@ export const register: Register = on => {
   on('command.run', { command: 'git-pane' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Git' })
     await refresh($)
+    await refreshIssues($).catch(() => {})
 
     return { text: 'Git pane opened.' }
   })
@@ -172,6 +200,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     await refresh($)
+    void refreshIssues($).catch(() => {})
 
     return next(e)
   })
@@ -192,6 +221,8 @@ export const register: Register = on => {
     const closed = await read($, collapsed)
     const shown = await read($, preview)
     const untrackedRows = tree(g.untracked, closed)
+    const gh = await read($, issues)
+    const isIssues = await read($, isIssuesOpen)
 
     if (!g.isRepo) {
       return <Text dimColor>Not a git repository.</Text>
@@ -320,6 +351,22 @@ export const register: Register = on => {
             {graphLines.map(l => <Text>{l}</Text>)}
           </Box>
         )}
+        <Text> </Text>
+        <Button
+          key="issues"
+          plain
+          label={`${isIssues ? '▾' : '▸'} Issues (${gh.items.length})`}
+          onPress={() => update($, isIssuesOpen, v => !v)}
+        />
+        {isIssues && !gh.isAvailable && <Text dimColor>{'  '}gh unavailable or no GitHub remote.</Text>}
+        {isIssues && gh.isAvailable && gh.items.length === 0 && <Text dimColor>{'  '}No open issues.</Text>}
+        {isIssues &&
+          gh.items.map(i => (
+            <Text key={`issue:${i.number}`}>
+              <Text dimColor>{'  '}#{i.number}</Text> {i.title}
+              {i.labels.length > 0 && <Text color="cyan"> [{i.labels.join(', ')}]</Text>}
+            </Text>
+          ))}
       </Box>
     )
   })

@@ -36,7 +36,7 @@ const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
   on('process.run', (_: any, e: any) => {
     const argv = [...e.argv]
     calls.push(argv)
-    const key = argv[1] === 'diff' && argv.includes('--name-status') ? 'names' : argv[1]
+    const key = argv[0] === 'gh' ? 'gh' : argv[1] === 'diff' && argv.includes('--name-status') ? 'names' : argv[1]
     if (over[key]) return { value: over[key](argv) }
     switch (key) {
       case 'rev-parse': return { value: ok('main\n') }
@@ -44,6 +44,7 @@ const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
       case 'diff': return { value: ok(argv.at(-1) === 'src/a.ts' ? DIFF : '@@ -0,0 +1 @@\n+new\n') }
       case 'ls-files': return { value: ok('notes/todo.md\0x.txt\0') }
       case 'log': return { value: ok('* abc123 (HEAD -> main) first\n') }
+      case 'gh': return { value: ok('[{"number":7,"title":"Parser crash","labels":[{"name":"bug"}]}]') }
     }
     return { value: fail() }
   })
@@ -172,6 +173,27 @@ test('pressing a file tab, the graph and an untracked folder', async ($, on) => 
   await ui.press({ key: 'dir:notes' })
   expect(await ui.find({ key: 'file:notes/todo.md' })).toBeUndefined()
   expect(await ui.find({ key: 'file:x.txt' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('open GitHub issues are listed with labels and fold away', async ($, on) => {
+  engine(on)
+  git(on)
+  await $.command.run({ command: 'git-pane' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'issues' }))?.text).toContain('Issues (1)')
+  expect((await ui.find({ type: 'Text', text: /#7/ }))?.text).toMatch(/#7 Parser crash \[bug\]/)
+  await ui.press({ key: 'issues' })
+  expect(await ui.find({ type: 'Text', text: /#7/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('gh missing shows a hint instead of issues', async ($, on) => {
+  engine(on)
+  git(on, { gh: fail })
+  await $.command.run({ command: 'git-pane' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /gh unavailable/ })).toBeDefined()
   await ui.unmount()
 })
 
