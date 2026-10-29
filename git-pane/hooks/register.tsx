@@ -168,7 +168,9 @@ export const register: Register = on => {
       name: 'git-pane',
       description: 'Show branch, diffs, git graph and issues in a pane',
     })
-    void $.ui.open({ id: PANE, title: 'Git' })
+    // shortcut: tabs follow open order and no API orders them; staggered opens keep
+    // Agents & plan | Git | Files | MCP servers, upgrade if ui.open gains an order
+    void $.clock.sleep(150).then(() => $.ui.open({ id: PANE, title: 'Git' }))
     await refresh($)
     void refreshIssues($).catch(() => {})
 

@@ -1,1 +1,1 @@
-{ "name": "mcp-pane", "version": "0.1.0", "description": "Right pane: MCP servers connected in this session, each expandable to its tools", "types": "./types/index.d.ts" }
+{ "name": "mcp-pane", "version": "0.1.1", "description": "Right pane: MCP servers connected in this session, each expandable to its tools", "types": "./types/index.d.ts" }

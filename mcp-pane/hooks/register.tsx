@@ -37,7 +37,9 @@ export const register: Register = on => {
       name: 'mcp-pane',
       description: 'Show the MCP servers of this session in a pane',
     })
-    void $.ui.open({ id: PANE, title: 'MCP servers' })
+    // shortcut: tabs follow open order and no API orders them; staggered opens keep
+    // Agents & plan | Git | Files | MCP servers, upgrade if ui.open gains an order
+    void $.clock.sleep(450).then(() => $.ui.open({ id: PANE, title: 'MCP servers' }))
     const done = await next(e)
     await refresh($).catch(() => {})
 

@@ -61,7 +61,9 @@ export const register: Register = on => {
       name: 'file-tree',
       description: 'Show the file tree; select a file to edit it in a pane',
     })
-    void $.ui.open({ id: TREE, title: 'Files' })
+    // shortcut: tabs follow open order and no API orders them; staggered opens keep
+    // Agents & plan | Git | Files | MCP servers, upgrade if ui.open gains an order
+    void $.clock.sleep(300).then(() => $.ui.open({ id: TREE, title: 'Files' }))
     await refresh($)
 
     return next(e)
