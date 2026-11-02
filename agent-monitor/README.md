@@ -18,6 +18,10 @@ Name the steps in the agent's description or prompt: `Step 1.2 check icons`, `[1
 
 `plan_step` sets a step's status by number, for sessions where TodoWrite is not available.
 
+## Plan first
+
+When a skill named `implement` (or `<plugin>:implement`) loads in the main session, the model is told to write the ticket's plan as numbered steps, and its `Edit`/`Write` calls are refused until it does (TodoWrite, TaskCreate or `plan_step`). Subagents are not blocked. `/monitor-clear` lifts the block.
+
 ## Limits
 
 Pause holds an agent at its next tool call; a command already running finishes. The plan merges each todo list rewrite, so finished steps stay listed until `/monitor-clear`.
