@@ -136,6 +136,18 @@ test('a non-ASCII path git quotes is diffed by its real name', async ($, on) => 
   expect(diffs.map(c => c.at(-1))).toEqual(['café.txt'])
 })
 
+test('/clear reopens and refills the pane', async ($, on) => {
+  const opened = engine(on)
+  git(on)
+  on('classic.SessionStart', () => ({}))
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(opened).toContain('git-pane')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /⎇/ }))?.text).toContain('main')
+  await ui.unmount()
+})
+
 test('/git-pane opens the pane and refreshes', async ($, on) => {
   const opened = engine(on)
   const calls = git(on)

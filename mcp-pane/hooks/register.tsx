@@ -44,6 +44,17 @@ export const register: Register = on => {
     return done
   })
 
+  // /clear starts a new session (fresh $.state) without a session.start: fill the pane again
+  on('classic.SessionStart', async ($, e, next) => {
+    const done = await next(e)
+    if (e.source === 'clear') {
+      void $.ui.open({ id: PANE, title: 'MCP servers' })
+      await refresh($).catch(() => {})
+    }
+
+    return done
+  })
+
   on('command.run', { command: 'mcp-pane' }, async $ => {
     await $.ui.open({ id: PANE, title: 'MCP servers' })
     await refresh($)
