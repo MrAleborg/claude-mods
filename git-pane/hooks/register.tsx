@@ -79,6 +79,27 @@ const tree = (paths: string[], closed: string[]): TreeRow[] => {
   return rows
 }
 
+// Colours a `git log --graph --oneline --decorate` line the way git does in a terminal; piped output has none.
+const refColor = (r: string) =>
+  r.startsWith('HEAD') ? 'cyan' : r.startsWith('tag: ') ? 'yellow' : r.includes('/') ? 'red' : 'green'
+type Part = { text: string; color?: string; dim?: boolean; bold?: boolean }
+const graphParts = (line: string): Part[] => {
+  const m = /^([^0-9a-f]*)([0-9a-f]{4,})(?: \((.*?)\))?(.*)$/.exec(line)
+  if (!m) return [{ text: line, dim: true }]
+  const refs = m[3] ? m[3].split(', ') : []
+  return [
+    { text: m[1], dim: true },
+    { text: m[2], color: 'yellow' },
+    ...(refs.length ? [{ text: ' (', color: 'yellow' }] : []),
+    ...refs.flatMap((r, i) => [
+      ...(i ? [{ text: ', ', color: 'yellow' }] : []),
+      { text: r, color: refColor(r), bold: true },
+    ]),
+    ...(refs.length ? [{ text: ')', color: 'yellow' }] : []),
+    { text: m[4] },
+  ]
+}
+
 type Row = { kind: '+' | '-' | ' ' | '@'; no: number | null; text: string }
 
 // Drops the git headers and numbers each line; the tab already names the file.
@@ -348,7 +369,9 @@ export const register: Register = on => {
         />
         {open && (
           <Box flexDirection="column" borderStyle="round">
-            {graphLines.map(l => <Text>{l}</Text>)}
+            {graphLines.map(l => (
+              <Text>{graphParts(l).map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
+            ))}
           </Box>
         )}
         <Text> </Text>

@@ -168,6 +168,9 @@ test('pressing a file tab, the graph and an untracked folder', async ($, on) => 
   expect(await ui.find({ type: 'Text', text: /abc123/ })).toBeUndefined()
   await ui.press({ key: 'graph' })
   expect(await ui.find({ type: 'Text', text: /abc123/ })).toBeDefined()
+  const parts = (await ui.find({ type: 'Text', text: /abc123/ }))?.children as any[]
+  expect(parts.find(c => c.children?.[0] === 'abc123')?.props.color).toBe('yellow')
+  expect(parts.find(c => c.children?.[0] === 'HEAD -> main')?.props).toMatchObject({ color: 'cyan', bold: true })
 
   expect(await ui.find({ key: 'file:notes/todo.md' })).toBeDefined()
   await ui.press({ key: 'dir:notes' })
