@@ -179,15 +179,6 @@ export const register: Register = on => {
     return { result: hit ? `Step ${step} is now ${status}.` : `No step numbered ${step} in the plan.` }
   })
 
-  // skill.prompt fires however the skill loads (/name, the Skill tool, a preload); tool.call sees only the Skill tool.
-  on('skill.prompt', async ($, e, next) => {
-    const out = await next(e)
-    if (!/(^|:)implement/i.test(e.skill)) return out
-    await update($, gate, () => true)
-
-    return { text: `${out.text}\n\n${PLAN_FIRST}` }
-  })
-
   on('command.run', { command: 'monitor-clear' }, async $ => {
     await update($, steps, () => [])
     await update($, agents, () => [])
@@ -271,6 +262,10 @@ export const register: Register = on => {
     }
 
     const out = await next(e)
+    if (!e.agentId && /(^|:)implement/i.test(skill) && !out.deny && !out.isError) {
+      await update($, gate, () => true)
+      return { ...out, context: [...(out.context ?? []), PLAN_FIRST] }
+    }
     // Task tools change one task at a time and return the id only in the result, so the plan is built from the answered call.
     // shortcut: Task tasks are flat (no nesting) unless the subject carries "1.2 ..." numbering.
     const input = e as unknown as { tool: string; taskId?: string; subject?: string; owner?: string; status?: Step['status'] | 'deleted' }

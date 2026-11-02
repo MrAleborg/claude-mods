@@ -356,9 +356,8 @@ test('PostToolUse reads the transcript into Main tokens, model and cost', async 
 test('an implement skill adds the plan-first note and blocks main-session edits until a plan is written', async ($, on) => {
   on('tool.call', () => ({ result: {} }) as any)
 
-  on('skill.prompt', (_, e) => ({ text: `body of ${e.skill}` }) as any)
-  const loaded = await $.skill.prompt({ skill: 'mraleborg-skills:implement', text: 'body', frontmatter: {}, source: 'plugin' } as any)
-  expect((loaded as any).text).toMatch(/^body of mraleborg-skills:implement\n\n.*implementation plan/s)
+  const loaded = await $.tool.call({ tool: 'Skill', skill: 'mraleborg-skills:implement' } as any)
+  expect(((loaded as any).context ?? []).some((c: string) => /implementation plan/.test(c))).toBe(true)
 
   expect((await $.tool.call({ tool: 'Edit', file_path: '/a', old_string: 'x', new_string: 'y' } as any) as any).deny).toMatch(/Plan first/)
   expect((await $.tool.call({ tool: 'Edit', agentId: 'sub1', file_path: '/a', old_string: 'x', new_string: 'y' } as any) as any).deny).toBeUndefined()
@@ -366,6 +365,6 @@ test('an implement skill adds the plan-first note and blocks main-session edits 
   await $.tool.call(todo([{ content: '1. Do it', status: 'pending' }]))
   expect((await $.tool.call({ tool: 'Write', file_path: '/a', content: '' } as any) as any).deny).toBeUndefined()
 
-  const other = await $.skill.prompt({ skill: 'tdd', text: 'body', frontmatter: {}, source: 'plugin' } as any)
-  expect((other as any).text).toBe('body of tdd')
+  const other = await $.tool.call({ tool: 'Skill', skill: 'tdd' } as any)
+  expect((other as any).context).toBeUndefined()
 })
