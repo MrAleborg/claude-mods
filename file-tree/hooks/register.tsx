@@ -67,6 +67,16 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // /clear starts a new session (fresh $.state) without a session.start: fill the pane again
+  on('classic.SessionStart', async ($, e, next) => {
+    if (e.source === 'clear') {
+      void $.ui.open({ id: TREE, title: 'Files' })
+      await refresh($).catch(() => {})
+    }
+
+    return next(e)
+  })
+
   on('command.run', { command: 'file-tree' }, async $ => {
     await $.ui.open({ id: TREE, title: 'Files' })
     await refresh($)
