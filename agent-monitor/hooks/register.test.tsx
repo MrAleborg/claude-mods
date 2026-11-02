@@ -352,19 +352,3 @@ test('PostToolUse reads the transcript into Main tokens, model and cost', async 
   expect((await texts(ui)).some(x => /Main · claude-sonnet-4 · 2.0k tok$/.test(x))).toBe(true)
   await ui.unmount()
 })
-
-test('an implement skill adds the plan-first note and blocks main-session edits until a plan is written', async ($, on) => {
-  on('tool.call', () => ({ result: {} }) as any)
-
-  const loaded = await $.tool.call({ tool: 'Skill', skill: 'mraleborg-skills:implement' } as any)
-  expect(((loaded as any).context ?? []).some((c: string) => /implementation plan/.test(c))).toBe(true)
-
-  expect((await $.tool.call({ tool: 'Edit', file_path: '/a', old_string: 'x', new_string: 'y' } as any) as any).deny).toMatch(/Plan first/)
-  expect((await $.tool.call({ tool: 'Edit', agentId: 'sub1', file_path: '/a', old_string: 'x', new_string: 'y' } as any) as any).deny).toBeUndefined()
-
-  await $.tool.call(todo([{ content: '1. Do it', status: 'pending' }]))
-  expect((await $.tool.call({ tool: 'Write', file_path: '/a', content: '' } as any) as any).deny).toBeUndefined()
-
-  const other = await $.tool.call({ tool: 'Skill', skill: 'tdd' } as any)
-  expect((other as any).context).toBeUndefined()
-})

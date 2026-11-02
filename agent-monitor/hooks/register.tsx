@@ -7,11 +7,6 @@ const PANE = 'agent-monitor'
 const agents = atom({ plugin: 'agent-monitor', key: 'agents' } as const, [], { shape: 'agents-3' })
 const steps = atom({ plugin: 'agent-monitor', key: 'steps' } as const, [], { shape: 'steps-1' })
 
-// Set when an implement skill loads in the main session; edits are refused until a plan is written.
-const gate = atom({ plugin: 'agent-monitor', key: 'gate' } as const, false, { shape: 'gate-1' })
-const PLAN_FIRST = 'Before editing any file, write the full implementation plan for this ticket as numbered steps (1., 1.1, ...) with TodoWrite or TaskCreate (plan_step if neither is available).'
-const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-
 const folded = atom({ plugin: 'agent-monitor', key: 'folded' } as const, { plan: false, agents: false }, { shape: 'folded-1' })
 
 // One line on what a tool call does: the tool plus its most telling argument.
@@ -171,7 +166,6 @@ export const register: Register = on => {
       return hit || !title ? next : [...next, { content: numberOf(title) === step ? title : `${step} ${title}`, status }]
     })
     hit ||= !!title
-    if (hit) await update($, gate, () => false)
 
     const [plan, runs] = [await read($, steps), await read($, agents)]
     await update($, main, m => ({ ...m, tasks: claimed(plan, runs, m.tasks) }))
@@ -184,7 +178,6 @@ export const register: Register = on => {
     await update($, agents, () => [])
     await update($, opened, () => ({}))
     await update($, main, () => ({}))
-    await update($, gate, () => false)
 
     return { text: 'Plan and agents cleared.' }
   })
@@ -197,7 +190,6 @@ export const register: Register = on => {
 
       return [...old.filter(t => !seen.has(t.content)).map(t => ({ ...t, status: t.status === 'in_progress' ? 'completed' as const : t.status })), ...fresh].slice(-100)
     })
-    if (e.todos.length) await update($, gate, () => false)
 
     return next(e)
   })
@@ -241,8 +233,6 @@ export const register: Register = on => {
     }
 
     const skill = e.tool === 'Skill' ? String((e as unknown as { skill?: string }).skill ?? '') : ''
-    if (!e.agentId && EDITS.has(e.tool) && (await read($, gate))) return { deny: `Plan first. ${PLAN_FIRST}` }
-
     if (skill) {
       if (e.agentId) await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, skills: addSkill(a.skills, skill) } : a)))
     }
@@ -262,10 +252,6 @@ export const register: Register = on => {
     }
 
     const out = await next(e)
-    if (!e.agentId && /(^|:)implement/i.test(skill) && !out.deny && !out.isError) {
-      await update($, gate, () => true)
-      return { ...out, context: [...(out.context ?? []), PLAN_FIRST] }
-    }
     // Task tools change one task at a time and return the id only in the result, so the plan is built from the answered call.
     // shortcut: Task tasks are flat (no nesting) unless the subject carries "1.2 ..." numbering.
     const input = e as unknown as { tool: string; taskId?: string; subject?: string; owner?: string; status?: Step['status'] | 'deleted' }
@@ -273,7 +259,6 @@ export const register: Register = on => {
     if (e.tool === 'TaskCreate' && task?.id) {
       const step: Step = { id: task.id, content: task.subject ?? input.subject ?? '', status: 'pending' }
       await update($, steps, old => [...old, step].slice(-100))
-      await update($, gate, () => false)
     }
     if (e.tool === 'TaskUpdate' && input.taskId) {
       await update($, steps, old =>

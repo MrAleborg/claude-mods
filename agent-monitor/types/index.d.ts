@@ -3,6 +3,6 @@ export type Step = { id?: string; owner?: string; content: string; status: 'pend
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-monitor': { gate: Shaped<boolean>; agents: Shaped<AgentRun[]>; steps: Shaped<Step[]>; folded: Shaped<{ plan: boolean; agents: boolean }>; opened: Shaped<Record<string, boolean>>; view: Shaped<{ planRows: number; agentsRows: number; planOff: number; agentsOff: number }>; main: Shaped<{ doing?: string; log?: string[]; tasks?: string[]; skills?: string[]; tokens?: number; cost?: number; model?: string; effort?: string }> }
+    'agent-monitor': { agents: Shaped<AgentRun[]>; steps: Shaped<Step[]>; folded: Shaped<{ plan: boolean; agents: boolean }>; opened: Shaped<Record<string, boolean>>; view: Shaped<{ planRows: number; agentsRows: number; planOff: number; agentsOff: number }>; main: Shaped<{ doing?: string; log?: string[]; tasks?: string[]; skills?: string[]; tokens?: number; cost?: number; model?: string; effort?: string }> }
   }
 }
