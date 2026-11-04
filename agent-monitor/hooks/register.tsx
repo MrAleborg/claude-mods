@@ -121,53 +121,6 @@ const usd = (n: number) => `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`
 const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
 const addSkill = (list: string[] = [], s: string) => [...list.filter(x => x !== s), s].slice(-5)
 
-// An empty plan starts from the repo's open GitHub issues: issue N is step "N. #12 Title" (id "12", so "task #12" or plan_step "12" reaches it),
-// and its tasks are the steps under it: the body's "- [ ]" checklist, if any.
-// shortcut: needs gh and a GitHub remote, else the plan stays empty; read once, so issues opened later are not added.
-const CHECK = /^\s*[-*]\s+\[([ xX])\]\s+(.+)$/gm
-
-type Issue = { number: number; title: string; body?: string; blockedBy?: { nodes: { number: number; state: string }[] } }
-const ISSUES = 'query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){issues(states:OPEN,first:50,orderBy:{field:CREATED_AT,direction:ASC}){nodes{number title body blockedBy(first:20){nodes{number state}}}}}}'
-
-// An issue's open blockers among the open issues: GitHub's "blocked by" links, plus "blocked by #5" or "depends on #5, #6" in its body.
-const blockersOf = (i: Issue, open: Set<number>) => {
-  const said = [...(i.body ?? '').matchAll(/\b(?:blocked by|depends on)\b((?:[\s,]*(?:and\s+)?#\d+)+)/gi)].flatMap(m => m[1].match(/\d+/g)!.map(Number))
-  const linked = (i.blockedBy?.nodes ?? []).filter(b => b.state === 'OPEN').map(b => b.number)
-
-  return [...new Set([...linked, ...said])].filter(n => open.has(n) && n !== i.number)
-}
-
-// Ready issues first, then each wave whose blockers all come earlier; issues in a blocking cycle go last. Order within a wave is kept.
-const readyFirst = (issues: Issue[]) => {
-  const open = new Set(issues.map(i => i.number))
-  const by = new Map(issues.map(i => [i.number, blockersOf(i, open)]))
-  const out: Issue[] = []
-  let left = issues
-  while (left.length) {
-    const placed = new Set(out.map(i => i.number))
-    const wave = left.filter(i => by.get(i.number)!.every(b => placed.has(b)))
-    if (!wave.length) break
-    out.push(...wave)
-    left = left.filter(i => !wave.includes(i))
-  }
-
-  return { order: [...out, ...left], by }
-}
-
-const seedFromIssues = async ($: any) => {
-  if ((await read($, steps)).length) return
-  const r = await $.process.run(['gh', 'api', 'graphql', '-f', `query=${ISSUES}`, '-F', 'owner={owner}', '-F', 'repo={repo}'])
-  if (r.exitCode !== 0) return
-  const { order: found, by } = readyFirst(JSON.parse(r.stdout).data.repository.issues.nodes as Issue[])
-  if (!found.length) return
-  const at = new Map(found.map((i, x) => [i.number, x + 1]))
-  const plan = found.flatMap((i, x) => [
-    { id: String(i.number), content: `${x + 1}. #${i.number} ${i.title}${by.get(i.number)!.length ? ` (blocked by ${by.get(i.number)!.map(b => at.get(b)).join(', ')})` : ''}`, status: 'pending' as const },
-    ...[...(i.body ?? '').matchAll(CHECK)].map((m, k) => ({ content: `${x + 1}.${k + 1} ${m[2].trim()}`, status: m[1] === ' ' ? 'pending' as const : 'completed' as const })),
-  ])
-  await update($, steps, old => (old.length ? old : plan))
-}
-
 const MARK = { completed: '✔', in_progress: '▶', pending: '○' } as const
 
 export const register: Register = on => {
@@ -184,18 +137,16 @@ export const register: Register = on => {
     })
     await $.command.register({ name: 'monitor-clear', description: 'Clear the plan and the agent list in the pane' })
     void $.ui.open({ id: PANE, title: 'Agents & plan' })
-    void seedFromIssues($).catch(() => {})
 
     return next(e)
   })
 
-  // /clear starts a new session without a session.start: reopen the pane and rebuild the plan from the issues and the branch.
+  // /clear starts a new session without a session.start: reopen the pane and start the new session with an empty plan.
   on('classic.SessionStart', async ($, e, next) => {
     if (e.source === 'clear') {
       void $.ui.open({ id: PANE, title: 'Agents & plan' })
       await update($, steps, () => [])
       await update($, main, () => ({}))
-      void seedFromIssues($).catch(() => {})
     }
 
     return next(e)
@@ -203,7 +154,6 @@ export const register: Register = on => {
 
   on('command.run', { command: 'monitor' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Agents & plan' })
-    await seedFromIssues($).catch(() => {})
 
     return { text: 'Agent monitor pane opened.' }
   })

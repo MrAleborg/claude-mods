@@ -177,7 +177,7 @@ const refreshIssues = async ($: any) => {
         number: i.number,
         title: i.title,
         labels: i.labels.map((l: any) => l.name),
-      }))
+      })).sort((a: any, b: any) => a.number - b.number) // gh lists newest first; show newest last
     }
   } catch {}
   await update($, issues, () => ({ isAvailable: r.exitCode === 0, items }))

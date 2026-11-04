@@ -21,13 +21,6 @@ const spawn = (over: object = {}) =>
 
 const PLAN_STEP = 'mcp__agent-monitor__plan_step'
 
-// gh answers the issues; git answers a branch, or fails (no branch state) when none is given.
-const repo = (on: any, issues: object[], git: Record<string, string> = {}) =>
-  on('process.run', (_: any, e: any) => {
-    const out = e.argv[0] === 'gh' ? JSON.stringify({ data: { repository: { issues: { nodes: issues } } } }) : git[e.argv[1]]
-    return { value: out === undefined ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: out, stderr: '' } }
-  })
-
 test('session start registers both commands, the plan_step tool, and opens the pane', async ($, on) => {
   const commands: string[] = []
   const tools: string[] = []
@@ -405,67 +398,17 @@ test('folding one agent folds only that agent, even when two spawns share a tool
   await ui.unmount()
 })
 
-test('/monitor builds a tree from open issues: checklist items under theirs, no model or agent involved', async ($, on) => {
-  const issues = [
-    { number: 12, title: 'Parser crash', body: 'Steps:\n- [x] Reproduce\n- [ ] Fix tokenizer' },
-    { number: 3, title: 'Docs', body: 'Write the docs.' },
-  ]
-  const calls: unknown[] = []
+test('/clear empties the plan', async ($, on) => {
   on('ui.open', () => ({ value: { isPlaced: true } }) as any)
-  repo(on, issues)
-  on('agent.spawn', (_: any, e: any) => (calls.push(e), { model: 'haiku' }) as any)
-  on('model.complete', (_: any, e: any) => (calls.push(e), { value: { isAnswered: true, text: '', usage: { input_tokens: 1, output_tokens: 1 } } }) as any)
-
-  await $.command.run({ command: 'monitor', args: '' } as any)
-  expect(calls.length).toBe(0)
-
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const t = await texts(ui)
-  const at = (re: RegExp) => t.findIndex(x => re.test(x))
-  expect(at(/#12 Parser crash/)).toBeLessThan(at(/Reproduce/))
-  expect(at(/Fix tokenizer/)).toBeLessThan(at(/#3 Docs/))
-  expect(t.some(x => /✔.*Reproduce/.test(x))).toBe(true)
-  expect(t.some(x => /Plan \(1\/4\)/.test(x))).toBe(true)
-  expect(t.some(x => /Assigned/.test(x))).toBe(false)
-  await ui.unmount()
-
-  const out = await $.tool.call({ tool: PLAN_STEP, step: '12', status: 'completed' } as any)
-  expect((out as { result?: string }).result).toBe('Step 12 is now completed.')
-})
-test('issues are ordered ready first; a blocked one says by which step, from GitHub links or its body', async ($, on) => {
-  const issues = [
-    { number: 1, title: 'Ship it', body: 'Depends on #2 and #3.\n- [ ] Release', blockedBy: { nodes: [] } },
-    { number: 2, title: 'Build API', body: '- [ ] Routes', blockedBy: { nodes: [{ number: 3, state: 'OPEN' }, { number: 99, state: 'CLOSED' }] } },
-    { number: 3, title: 'Schema', body: '- [ ] Tables', blockedBy: { nodes: [] } },
-  ]
-  on('ui.open', () => ({ value: { isPlaced: true } }) as any)
-  repo(on, issues)
-
-  await $.command.run({ command: 'monitor', args: '' } as any)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const t = await texts(ui)
-  const at = (re: RegExp) => t.findIndex(x => re.test(x))
-  expect(at(/○ #3 Schema \(0\/1\)/)).toBeGreaterThan(-1)
-  expect(at(/#3 Schema/)).toBeLessThan(at(/#2 Build API/))
-  expect(at(/#2 Build API/)).toBeLessThan(at(/#1 Ship it/))
-  expect(t.some(x => /⊘ #2 Build API \(blocked by 1\)/.test(x))).toBe(true)
-  expect(t.some(x => /⊘ #1 Ship it \(blocked by 2, 1\)/.test(x))).toBe(true)
-  await ui.unmount()
-})
-
-test('/clear rebuilds the plan from the issues', async ($, on) => {
-  on('ui.open', () => ({ value: { isPlaced: true } }) as any)
-  repo(on, [{ number: 7, title: 'Fresh issue', body: '- [ ] a', blockedBy: { nodes: [] } }])
   on('classic.SessionStart', () => ({}) as any)
   on('tool.call', () => ({ result: {} }) as any)
   await $.tool.call(todo([{ content: 'Old step', status: 'in_progress' }]))
 
   await $.classic.SessionStart({ source: 'clear', session_id: 's', transcript_path: '/t', cwd: '/', hook_event_name: 'SessionStart' } as any)
-  await new Promise(r => setTimeout(r, 50)) // the rebuild runs in the background
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const t = await texts(ui)
   expect(t.some(x => /Old step/.test(x))).toBe(false)
-  expect(t.some(x => /#7 Fresh issue/.test(x))).toBe(true)
+  expect(t.some(x => /no todo list yet/.test(x))).toBe(true)
   await ui.unmount()
 })

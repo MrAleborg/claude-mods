@@ -44,7 +44,7 @@ const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
       case 'diff': return { value: ok(argv.at(-1) === 'src/a.ts' ? DIFF : '@@ -0,0 +1 @@\n+new\n') }
       case 'ls-files': return { value: ok('notes/todo.md\0x.txt\0') }
       case 'log': return { value: ok('* abc123 (HEAD -> main) first\n') }
-      case 'gh': return { value: ok('[{"number":7,"title":"Parser crash","labels":[{"name":"bug"}]}]') }
+      case 'gh': return { value: ok('[{"number":9,"title":"Newer","labels":[]},{"number":7,"title":"Parser crash","labels":[{"name":"bug"}]}]') }
     }
     return { value: fail() }
   })
@@ -196,8 +196,11 @@ test('open GitHub issues are listed with labels and fold away', async ($, on) =>
   git(on)
   await $.command.run({ command: 'git-pane' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ key: 'issues' }))?.text).toContain('Issues (1)')
+  expect((await ui.find({ key: 'issues' }))?.text).toContain('Issues (2)')
   expect((await ui.find({ type: 'Text', text: /#7/ }))?.text).toMatch(/#7 Parser crash \[bug\]/)
+  // newest last
+  const rows = (await ui.findAll({ type: 'Text' })).map(x => x.text ?? '').filter(x => /#\d/.test(x))
+  expect(rows.findIndex(x => x.includes('#7'))).toBeLessThan(rows.findIndex(x => x.includes('#9')))
   await ui.press({ key: 'issues' })
   expect(await ui.find({ type: 'Text', text: /#7/ })).toBeUndefined()
   await ui.unmount()
