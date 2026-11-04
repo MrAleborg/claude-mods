@@ -247,9 +247,14 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // /clear starts a new session without a session.start: reopen the pane
+  // /clear starts a new session without a session.start: reopen the pane and rebuild the plan from the issues and the branch.
   on('classic.SessionStart', async ($, e, next) => {
-    if (e.source === 'clear') void $.ui.open({ id: PANE, title: 'Agents & plan' })
+    if (e.source === 'clear') {
+      void $.ui.open({ id: PANE, title: 'Agents & plan' })
+      await update($, steps, () => [])
+      await update($, main, () => ({}))
+      void seedFromIssues($).catch(() => {})
+    }
 
     return next(e)
   })

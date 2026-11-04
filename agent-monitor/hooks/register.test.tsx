@@ -504,3 +504,20 @@ test('no branch state and every issue with a checklist: no agent starts', async 
   await $.command.run({ command: 'monitor', args: '' } as any)
   expect(prompts.length).toBe(0)
 })
+
+test('/clear rebuilds the plan from the issues', async ($, on) => {
+  on('ui.open', () => ({ value: { isPlaced: true } }) as any)
+  repo(on, [{ number: 7, title: 'Fresh issue', body: '- [ ] a', blockedBy: { nodes: [] } }])
+  on('classic.SessionStart', () => ({}) as any)
+  on('tool.call', () => ({ result: {} }) as any)
+  await $.tool.call(todo([{ content: 'Old step', status: 'in_progress' }]))
+
+  await $.classic.SessionStart({ source: 'clear', session_id: 's', transcript_path: '/t', cwd: '/', hook_event_name: 'SessionStart' } as any)
+  await new Promise(r => setTimeout(r, 50)) // the rebuild runs in the background
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const t = await texts(ui)
+  expect(t.some(x => /Old step/.test(x))).toBe(false)
+  expect(t.some(x => /#7 Fresh issue/.test(x))).toBe(true)
+  await ui.unmount()
+})
