@@ -121,7 +121,7 @@ const usd = (n: number) => `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`
 const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
 const addSkill = (list: string[] = [], s: string) => [...list.filter(x => x !== s), s].slice(-5)
 
-const MARK = { completed: '✔', in_progress: '▶', pending: '○' } as const
+const MARK = { completed: '✓', in_progress: '►', pending: '○' } as const
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -423,16 +423,16 @@ export const register: Register = on => {
             onPress={() => update($, opened, o => ({ ...o, [a.id]: !(o[a.id] ?? true) }))}
           >
             <Text wrap="truncate-end" color={tone} strikethrough={a.state === 'killed'}>
-              {`${pad}  ${hasMore ? (isOpen ? '▾' : '▸') : ' '} ${a.isDone ? '✔' : isMain && !a.doing ? '○' : '●'} ${a.name}${a.model ? ` · ${a.model}${a.effort ? ` (${a.effort})` : ''}` : ''}${a.tokens ? ` · ${kilo(a.tokens)} tok` : ''}`}
+              {`${pad}  ${hasMore ? (isOpen ? '▾' : '▸') : ' '} ${a.isDone ? '✓' : isMain && !a.doing ? '○' : '●'} ${a.name}${a.model ? ` · ${a.model}${a.effort ? ` (${a.effort})` : ''}` : ''}${a.tokens ? ` · ${kilo(a.tokens)} tok` : ''}`}
             </Text>
           </Button>
           {a.agentId && !a.isDone && (
-            <Button plain key={`pause-${a.id}`} label={a.state === 'paused' ? ' ▶' : ' ‖'} onPress={() => setState(a, a.state === 'paused' ? undefined : 'paused')} />
+            <Button plain key={`pause-${a.id}`} label={a.state === 'paused' ? ' ►' : ' ‖'} onPress={() => setState(a, a.state === 'paused' ? undefined : 'paused')} />
           )}
           {a.agentId && !a.isDone && <Button plain key={`kill-${a.id}`} label=" ■" onPress={() => kill(a)} />}
           {!isMain && <Button plain key={`rm-${a.id}`} label=" ✕" onPress={() => update($, agents, l => l.filter(x => x.id !== a.id))} />}
         </Box>,
-        ...(isOpen && skills.length ? [<Text wrap="truncate-end" dimColor>{`${pad}      ⚙ ${skills.join(', ')}`}</Text>] : []),
+        ...(isOpen && skills.length ? [<Text wrap="truncate-end" dimColor>{`${pad}      ◇ ${skills.join(', ')}`}</Text>] : []),
         ...(isOpen ? tasks.flatMap((task, i) => {
           // Each task folds its own calls; calls filed under no listed task show under the agent.
           const mine = log.filter(l => l.task === task)
@@ -440,13 +440,13 @@ export const register: Register = on => {
           const done = (a.isDone && task === a.task) || plan.some(t => t.content === task && t.status === 'completed')
 
           return [
-            line(`task-${a.id}-${i}`, `${pad}    ${mine.length ? (open[k] ? '▾' : '▸') : ' '} ${done ? '✔' : '☰'} ${task}`, () => update($, opened, o => ({ ...o, [k]: !o[k] }))),
-            ...(open[k] ? mine.map(l => <Text wrap="truncate-end" dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>) : []),
+            line(`task-${a.id}-${i}`, `${pad}    ${mine.length ? (open[k] ? '▾' : '▸') : ' '} ${done ? '✓' : '☰'} ${task}`, () => update($, opened, o => ({ ...o, [k]: !o[k] }))),
+            ...(open[k] ? mine.map(l => <Text wrap="truncate-end" dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✓' : '…'} ${l.line}`}</Text>) : []),
           ]
         }) : []),
         ...(a.doing && !a.isDone ? [<Text wrap="truncate-end" dimColor>{`${pad}        ↳ ${a.doing}`}</Text>] : []),
         ...(isOpen ? log.filter(l => !l.task || !tasks.includes(l.task)).map(l => (
-          <Text wrap="truncate-end" dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>
+          <Text wrap="truncate-end" dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✓' : '…'} ${l.line}`}</Text>
         )) : []),
         ...(isOpen ? sub.flatMap(c => row(c, depth + 1)) : []),
       ]
@@ -460,7 +460,7 @@ export const register: Register = on => {
           ]
         : []),
       ...(open.assigned ? [] : now.flatMap(n => [
-        <Text wrap="truncate-end" color="green">{`    ▶ ${n.text}`}</Text>,
+        <Text wrap="truncate-end" color="green">{`    ► ${n.text}`}</Text>,
         ...whoHas(n.step).map(name => <Text wrap="truncate-end" dimColor>{`        ● ${name}`}</Text>),
       ])),
       ...(plan.length === 0 ? [<Text wrap="truncate-end" dimColor>  no todo list yet</Text>] : []),
