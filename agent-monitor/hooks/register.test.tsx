@@ -398,22 +398,39 @@ test('folding one agent folds only that agent, even when two spawns share a tool
   await ui.unmount()
 })
 
-test('/monitor fills an empty plan from open GitHub issues, and leaves an existing plan alone', async ($, on) => {
+test('/monitor builds a tree from open issues: checklist items under theirs, an agent splits the rest', async ($, on) => {
+  const issues = [
+    { number: 12, title: 'Parser crash', body: 'Steps:\n- [x] Reproduce\n- [ ] Fix tokenizer' },
+    { number: 3, title: 'Docs', body: 'Write the docs.' },
+  ]
+  const prompts: string[] = []
   on('ui.open', () => ({ value: { isPlaced: true } }) as any)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '[{"number":12,"title":"Parser crash"},{"number":3,"title":"Docs"}]', stderr: '' } }) as any)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(issues), stderr: '' } }) as any)
+  on('agent.spawn', (_: any, e: any) => (prompts.push(e.prompt), { model: 'haiku', agentId: 'split1' }) as any)
+  on('clock.now', () => ({ value: 1 }) as any)
+  on('turn.complete', () => ({ text: '' }) as any)
+  on('agent.list', () => ({ value: [{ id: 'split1', spawnedBy: 'agent-monitor', description: 'Split issues into tasks', status: 'running' }] }) as any)
 
   await $.command.run({ command: 'monitor', args: '' } as any)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('2. Docs')
+  expect(prompts[0]).not.toContain('Parser crash')
+
+  await $.turn.complete({ agentId: 'split1', answer: '2.1 Outline the guide\n2.2 Write examples', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as any)
+
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const t = await texts(ui)
-  expect(t.some(x => /#12 Parser crash/.test(x))).toBe(true)
-  expect(t.some(x => /Plan \(0\/2\)/.test(x))).toBe(true)
+  const at = (re: RegExp) => t.findIndex(x => re.test(x))
+  expect(at(/#12 Parser crash/)).toBeLessThan(at(/Reproduce/))
+  expect(at(/Fix tokenizer/)).toBeLessThan(at(/#3 Docs/))
+  expect(at(/#3 Docs/)).toBeLessThan(at(/Outline the guide/))
+  expect(at(/Outline the guide/)).toBeLessThan(at(/Write examples/))
+  expect(t.some(x => /✔.*Reproduce/.test(x))).toBe(true)
   await ui.unmount()
 
+  // An existing plan is left alone: no second gh read, no second split.
+  await $.command.run({ command: 'monitor', args: '' } as any)
+  expect(prompts.length).toBe(1)
   const out = await $.tool.call({ tool: PLAN_STEP, step: '12', status: 'completed' } as any)
   expect((out as { result?: string }).result).toBe('Step 12 is now completed.')
-
-  await $.command.run({ command: 'monitor', args: '' } as any)
-  const ui2 = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await texts(ui2)).some(x => /Plan \(1\/2\)/.test(x))).toBe(true)
-  await ui2.unmount()
 })

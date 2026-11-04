@@ -6,7 +6,7 @@ The pane opens at session start (reopen it with `/monitor`; `/monitor-clear` emp
 
 ## What it shows
 
-- **Plan**: the session's todo list as a tree. When the plan is empty at session start or on `/monitor`, it is filled from the repo's open GitHub issues (via `gh`), one pending step `#12 Title` each; `task #12` or `plan_step` `12` reaches it. Write steps as `1. Build`, `1.1 Routes` (or indent two spaces per level) and parents fold and unfold. Icons: `▶` in progress, `○` pending, `✔` completed, `⊘` blocked. A step is blocked when its text says `blocked`; `blocked by 2.3` clears once step 2.3 completes.
+- **Plan**: the session's todo list as a tree. When the plan is empty at session start or on `/monitor`, it is built from the repo's open GitHub issues (via `gh`): each issue is a step `1. #12 Title`, and its tasks sit under it, taken from the issue's `- [ ]` checklist or, when it has none, split by a Haiku agent the mod starts. `task #12` or `plan_step` `12` reaches the issue's step. Write steps as `1. Build`, `1.1 Routes` (or indent two spaces per level) and parents fold and unfold. Icons: `▶` in progress, `○` pending, `✔` completed, `⊘` blocked. A step is blocked when its text says `blocked`; `blocked by 2.3` clears once step 2.3 completes.
 - **Assigned**: the steps someone is working on right now, with who has each one (an agent, or Main).
 - **Agents**: Main first, then every subagent as a tree under its parent, with a random first name if it has none. A row reads `name · model (effort) · tokens`; under it are the agent's tasks, each opening to the commands the agent ran for it. Running is blue, paused yellow, done green, killed gray with a strikethrough. Each running row has pause (`‖`), kill (`■`) and remove (`✕`) buttons.
 

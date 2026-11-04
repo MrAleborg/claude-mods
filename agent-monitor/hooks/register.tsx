@@ -121,14 +121,52 @@ const usd = (n: number) => `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`
 const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
 const addSkill = (list: string[] = [], s: string) => [...list.filter(x => x !== s), s].slice(-5)
 
-// An empty plan starts from the repo's open GitHub issues, one pending step each; the issue number is its id, so "task #12" or plan_step "12" reaches it.
+// An empty plan starts from the repo's open GitHub issues: issue N is step "N. #12 Title" (id "12", so "task #12" or plan_step "12" reaches it),
+// and its tasks are the steps under it: the body's "- [ ]" checklist, else what an agent splits it into.
 // shortcut: needs gh and a GitHub remote, else the plan stays empty; read once, so issues opened later are not added.
+const CHECK = /^\s*[-*]\s+\[([ xX])\]\s+(.+)$/gm
+// The agent this mod starts to split issues, told apart by its description; it answers "N.k task" lines.
+const SPLIT = 'Split issues into tasks'
+
+// Insert child steps right after step n's last descendant, so the tree puts them under it; steps already there are skipped.
+const addKids = (old: Step[], n: string, kids: Step[]) => {
+  const at = old.findLastIndex(t => { const m = numberOf(t.content); return m === n || !!m?.startsWith(`${n}.`) })
+  const fresh = kids.filter(k => !old.some(t => t.content === k.content))
+
+  return at < 0 ? old : [...old.slice(0, at + 1), ...fresh, ...old.slice(at + 1)]
+}
+
 const seedFromIssues = async ($: any) => {
   if ((await read($, steps)).length) return
-  const r = await $.process.run(['gh', 'issue', 'list', '--state', 'open', '--json', 'number,title', '--limit', '50'])
+  const r = await $.process.run(['gh', 'issue', 'list', '--state', 'open', '--json', 'number,title,body', '--limit', '50'])
   if (r.exitCode !== 0) return
-  const found: { number: number; title: string }[] = JSON.parse(r.stdout)
-  await update($, steps, old => (old.length ? old : found.map(i => ({ id: String(i.number), content: `#${i.number} ${i.title}`, status: 'pending' as const }))))
+  const found: { number: number; title: string; body?: string }[] = JSON.parse(r.stdout)
+  if (!found.length) return
+  const plan = found.flatMap((i, x) => [
+    { id: String(i.number), content: `${x + 1}. #${i.number} ${i.title}`, status: 'pending' as const },
+    ...[...(i.body ?? '').matchAll(CHECK)].map((m, k) => ({ content: `${x + 1}.${k + 1} ${m[2].trim()}`, status: m[1] === ' ' ? 'pending' as const : 'completed' as const })),
+  ])
+  let isSeeded = false
+  await update($, steps, old => (old.length ? old : ((isSeeded = true), plan)))
+  const bare = found.map((i, x) => ({ ...i, n: x + 1 })).filter(i => !(i.body ?? '').match(CHECK))
+  if (!isSeeded || !bare.length) return
+  await $.agent.spawn({
+    description: SPLIT,
+    model: 'haiku',
+    prompt: [
+      'Split each GitHub issue below into small atomic tasks: one concrete change each, in the order to do them, 2 to 6 per issue.',
+      'Answer with only lines "N.k task", where N is the issue\'s number in this list and k counts from 1. Nothing else.',
+      ...bare.map(i => `\n${i.n}. ${i.title}\n${(i.body ?? '').slice(0, 2000)}`),
+    ].join('\n'),
+  })
+}
+
+// The splitting agent's "N.k task" lines become steps under issue N.
+const takeSplit = async ($: any, answer: string) => {
+  const kids = [...answer.matchAll(/^\s*(\d+)\.(\d+)\.?\s+(.+)$/gm)]
+  for (const n of new Set(kids.map(m => m[1]))) {
+    await update($, steps, old => addKids(old, n, kids.filter(m => m[1] === n).map(m => ({ content: `${n}.${m[2]} ${m[3].trim()}`, status: 'pending' as const }))))
+  }
 }
 
 const MARK = { completed: '✔', in_progress: '▶', pending: '○' } as const
@@ -305,6 +343,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId && (await $.agent.list()).some(a => a.id === e.agentId && a.spawnedBy === 'agent-monitor' && a.description === SPLIT)) await takeSplit($, e.answer)
     await update($, main, m => ({ ...m, doing: undefined }))
 
     return next(e)
