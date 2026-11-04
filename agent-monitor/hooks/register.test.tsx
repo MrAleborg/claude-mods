@@ -405,46 +405,33 @@ test('folding one agent folds only that agent, even when two spawns share a tool
   await ui.unmount()
 })
 
-test('/monitor builds a tree from open issues: checklist items under theirs, an agent splits the rest', async ($, on) => {
+test('/monitor builds a tree from open issues: checklist items under theirs, no model or agent involved', async ($, on) => {
   const issues = [
     { number: 12, title: 'Parser crash', body: 'Steps:\n- [x] Reproduce\n- [ ] Fix tokenizer' },
     { number: 3, title: 'Docs', body: 'Write the docs.' },
   ]
-  const prompts: string[] = []
+  const calls: unknown[] = []
   on('ui.open', () => ({ value: { isPlaced: true } }) as any)
   repo(on, issues)
-  on('agent.spawn', (_: any, e: any) => (prompts.push(e.prompt), { model: 'haiku', agentId: 'split1' }) as any)
-  on('clock.now', () => ({ value: 1 }) as any)
-  on('turn.complete', () => ({ text: '' }) as any)
-  on('agent.list', () => ({ value: [{ id: 'split1', spawnedBy: 'agent-monitor', description: 'Plan issues against the branch', status: 'running' }] }) as any)
+  on('agent.spawn', (_: any, e: any) => (calls.push(e), { model: 'haiku' }) as any)
+  on('model.complete', (_: any, e: any) => (calls.push(e), { value: { isAnswered: true, text: '', usage: { input_tokens: 1, output_tokens: 1 } } }) as any)
 
   await $.command.run({ command: 'monitor', args: '' } as any)
-  expect(prompts.length).toBe(1)
-  expect(prompts[0]).toContain('2. #3 Docs (no tasks: split it)')
-  expect(prompts[0]).toContain('  1.2 Fix tokenizer')
-  expect(prompts[0]).not.toContain('Parser crash (no tasks')
-
-  await $.turn.complete({ agentId: 'split1', answer: '2.1 Outline the guide\n2.2 Write examples', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as any)
+  expect(calls.length).toBe(0)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const t = await texts(ui)
   const at = (re: RegExp) => t.findIndex(x => re.test(x))
   expect(at(/#12 Parser crash/)).toBeLessThan(at(/Reproduce/))
   expect(at(/Fix tokenizer/)).toBeLessThan(at(/#3 Docs/))
-  expect(at(/#3 Docs/)).toBeLessThan(at(/Outline the guide/))
-  expect(at(/Outline the guide/)).toBeLessThan(at(/Write examples/))
   expect(t.some(x => /✔.*Reproduce/.test(x))).toBe(true)
-  // The planning agent lists every issue but owns none of them.
+  expect(t.some(x => /Plan \(1\/4\)/.test(x))).toBe(true)
   expect(t.some(x => /Assigned/.test(x))).toBe(false)
   await ui.unmount()
 
-  // An existing plan is left alone: no second gh read, no second split.
-  await $.command.run({ command: 'monitor', args: '' } as any)
-  expect(prompts.length).toBe(1)
   const out = await $.tool.call({ tool: PLAN_STEP, step: '12', status: 'completed' } as any)
   expect((out as { result?: string }).result).toBe('Step 12 is now completed.')
 })
-
 test('issues are ordered ready first; a blocked one says by which step, from GitHub links or its body', async ($, on) => {
   const issues = [
     { number: 1, title: 'Ship it', body: 'Depends on #2 and #3.\n- [ ] Release', blockedBy: { nodes: [] } },
@@ -464,45 +451,6 @@ test('issues are ordered ready first; a blocked one says by which step, from Git
   expect(t.some(x => /⊘ #2 Build API \(blocked by 1\)/.test(x))).toBe(true)
   expect(t.some(x => /⊘ #1 Ship it \(blocked by 2, 1\)/.test(x))).toBe(true)
   await ui.unmount()
-})
-
-test('the plan agent gets the branch commits and diff, and its "done" lines complete tasks', async ($, on) => {
-  const issues = [
-    { number: 12, title: 'Parser crash', body: '- [ ] Reproduce\n- [ ] Fix tokenizer', blockedBy: { nodes: [] } },
-    { number: 3, title: 'Docs', body: '- [ ] Write guide', blockedBy: { nodes: [] } },
-  ]
-  const prompts: string[] = []
-  on('ui.open', () => ({ value: { isPlaced: true } }) as any)
-  repo(on, issues, { 'rev-parse': 'origin/main\n', 'merge-base': 'abc\n', log: 'f00 Fix tokenizer on empty input\n', diff: '+fixed\n' })
-  on('agent.spawn', (_: any, e: any) => (prompts.push(e.prompt), { model: 'haiku', agentId: 'split1' }) as any)
-  on('clock.now', () => ({ value: 1 }) as any)
-  on('turn.complete', () => ({ text: '' }) as any)
-  on('agent.list', () => ({ value: [{ id: 'split1', spawnedBy: 'agent-monitor', description: 'Plan issues against the branch', status: 'running' }] }) as any)
-
-  await $.command.run({ command: 'monitor', args: '' } as any)
-  expect(prompts.length).toBe(1)
-  expect(prompts[0]).toContain('f00 Fix tokenizer on empty input')
-  expect(prompts[0]).toContain('+fixed')
-
-  await $.turn.complete({ agentId: 'split1', answer: 'done 1.2\ndone 2', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't' } as any)
-
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const t = await texts(ui)
-  expect(t.some(x => /○ Reproduce/.test(x))).toBe(true)
-  expect(t.some(x => /✔ Fix tokenizer/.test(x))).toBe(true)
-  expect(t.some(x => /✔ Write guide/.test(x))).toBe(true)
-  expect(t.some(x => /Plan \(3\/5\)/.test(x))).toBe(true)
-  await ui.unmount()
-})
-
-test('no branch state and every issue with a checklist: no agent starts', async ($, on) => {
-  const prompts: string[] = []
-  on('ui.open', () => ({ value: { isPlaced: true } }) as any)
-  repo(on, [{ number: 1, title: 'A', body: '- [ ] a', blockedBy: { nodes: [] } }])
-  on('agent.spawn', (_: any, e: any) => (prompts.push(e.prompt), { model: 'haiku' }) as any)
-
-  await $.command.run({ command: 'monitor', args: '' } as any)
-  expect(prompts.length).toBe(0)
 })
 
 test('/clear rebuilds the plan from the issues', async ($, on) => {

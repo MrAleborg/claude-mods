@@ -122,20 +122,9 @@ const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 
 const addSkill = (list: string[] = [], s: string) => [...list.filter(x => x !== s), s].slice(-5)
 
 // An empty plan starts from the repo's open GitHub issues: issue N is step "N. #12 Title" (id "12", so "task #12" or plan_step "12" reaches it),
-// and its tasks are the steps under it: the body's "- [ ]" checklist, else what an agent splits it into. The same agent reads the
-// branch's commits and diff against the default branch and says which tasks are already implemented.
+// and its tasks are the steps under it: the body's "- [ ]" checklist, if any.
 // shortcut: needs gh and a GitHub remote, else the plan stays empty; read once, so issues opened later are not added.
 const CHECK = /^\s*[-*]\s+\[([ xX])\]\s+(.+)$/gm
-// The agent this mod starts on a new plan, told apart by its description; it answers "N.k [ ] task" lines and "done N.k" lines.
-const SPLIT = 'Plan issues against the branch'
-
-// Insert child steps right after step n's last descendant, so the tree puts them under it; steps already there are skipped.
-const addKids = (old: Step[], n: string, kids: Step[]) => {
-  const at = old.findLastIndex(t => { const m = numberOf(t.content); return m === n || !!m?.startsWith(`${n}.`) })
-  const fresh = kids.filter(k => !old.some(t => t.content === k.content))
-
-  return at < 0 ? old : [...old.slice(0, at + 1), ...fresh, ...old.slice(at + 1)]
-}
 
 type Issue = { number: number; title: string; body?: string; blockedBy?: { nodes: { number: number; state: string }[] } }
 const ISSUES = 'query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){issues(states:OPEN,first:50,orderBy:{field:CREATED_AT,direction:ASC}){nodes{number title body blockedBy(first:20){nodes{number state}}}}}}'
@@ -176,54 +165,7 @@ const seedFromIssues = async ($: any) => {
     { id: String(i.number), content: `${x + 1}. #${i.number} ${i.title}${by.get(i.number)!.length ? ` (blocked by ${by.get(i.number)!.map(b => at.get(b)).join(', ')})` : ''}`, status: 'pending' as const },
     ...[...(i.body ?? '').matchAll(CHECK)].map((m, k) => ({ content: `${x + 1}.${k + 1} ${m[2].trim()}`, status: m[1] === ' ' ? 'pending' as const : 'completed' as const })),
   ])
-  let isSeeded = false
-  await update($, steps, old => (old.length ? old : ((isSeeded = true), plan)))
-  if (!isSeeded) return
-  const branch = await branchState($)
-  const bare = new Set(found.filter(i => !(i.body ?? '').match(CHECK)).map(i => i.number))
-  if (!bare.size && !branch) return
-  await $.agent.spawn({
-    description: SPLIT,
-    model: 'haiku',
-    prompt: [
-      'Below are the open GitHub issues of this repo as a numbered plan, then the current branch\'s commits and diff.',
-      'For each issue marked "split it": split it into small atomic tasks, one concrete change each, in the order to do them, 2 to 6 per issue. Write each as "N.k [ ] task" (N the issue\'s plan number, k from 1), or "N.k [x] task" when the commits or diff already implement it.',
-      'For each existing task the commits or diff already implement, write "done N.k"; write "done N" when a commit fixes or closes the whole issue.',
-      'Mark a task done only on clear evidence. Answer with only those lines, nothing else.',
-      ...found.map((i, x) => [
-        `\n${x + 1}. #${i.number} ${i.title}${bare.has(i.number) ? ' (no tasks: split it)' : ''}`,
-        (i.body ?? '').slice(0, 1500),
-        ...plan.filter(t => numberOf(t.content)?.startsWith(`${x + 1}.`)).map(t => `  ${t.content}${t.status === 'completed' ? ' [done]' : ''}`),
-      ].join('\n')),
-      `\n--- branch ---\n${branch || '(no commits or changes against the default branch)'}`,
-    ].join('\n'),
-  })
-}
-
-// The branch's commits and diff (uncommitted work included) since it left the default branch; empty on the default branch with no changes.
-// shortcut: the diff is cut at 20k characters, so tasks implemented past it look undone; upgrade by letting the agent run git itself.
-const branchState = async ($: any) => {
-  const git = async (...args: string[]) => {
-    const r = await $.process.run(['git', ...args])
-    return r.exitCode === 0 ? String(r.stdout).trim() : ''
-  }
-  const base = (await git('rev-parse', '--abbrev-ref', 'origin/HEAD')) || 'main'
-  const from = await git('merge-base', base, 'HEAD')
-  if (!from) return ''
-  const log = await git('log', '--format=%h %s%n%b', '-n', '40', `${from}..HEAD`)
-  const diff = (await git('diff', from)).slice(0, 20000)
-
-  return [log && `commits:\n${log}`, diff && `diff:\n${diff}`].filter(Boolean).join('\n\n')
-}
-
-// The agent's "N.k [ ] task" lines become steps under issue N ("[x]": already done); "done N.k" completes that step, "done N" the issue and its tasks.
-const takeSplit = async ($: any, answer: string) => {
-  const kids = [...answer.matchAll(/^\s*(\d+)\.(\d+)\.?\s+(?:\[([ xX])\]\s+)?(.+)$/gm)]
-  for (const n of new Set(kids.map(m => m[1]))) {
-    await update($, steps, old => addKids(old, n, kids.filter(m => m[1] === n).map(m => ({ content: `${n}.${m[2]} ${m[4].trim()}`, status: m[3] && m[3] !== ' ' ? 'completed' as const : 'pending' as const }))))
-  }
-  const done = [...answer.matchAll(/^\s*done\s+(\d+(?:\.\d+)*)/gim)].map(m => m[1])
-  if (done.length) await update($, steps, old => old.map(t => { const m = numberOf(t.content) ?? ''; return done.some(d => m === d || m.startsWith(`${d}.`)) ? { ...t, status: 'completed' as const } : t }))
+  await update($, steps, old => (old.length ? old : plan))
 }
 
 const MARK = { completed: '✔', in_progress: '▶', pending: '○' } as const
@@ -309,8 +251,7 @@ export const register: Register = on => {
   // The Agent tool returns at launch for background agents, so completion comes from the subagent events.
   on('agent.spawn', async ($, e, next) => {
     // Steps named by number (or Task id) in the description or prompt; else the first step in progress at spawn (a guess).
-    // The planning agent this mod starts lists every issue, so it would claim them all: it gets no step.
-    const plan = e.description === SPLIT ? [] : await read($, steps)
+    const plan = await read($, steps)
     const refs = new Set([...stepRefs(e.description), ...stepRefs(e.prompt)])
     const named = plan.filter(t => refs.has(numberOf(t.content) ?? '') || (!!t.id && refs.has(t.id)))
     const task = named[0]?.content ?? plan.find(t => t.status === 'in_progress' && !t.owner)?.content
@@ -406,7 +347,6 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId && (await $.agent.list()).some(a => a.id === e.agentId && a.spawnedBy === 'agent-monitor' && a.description === SPLIT)) await takeSplit($, e.answer)
     await update($, main, m => ({ ...m, doing: undefined }))
 
     return next(e)
