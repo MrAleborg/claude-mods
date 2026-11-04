@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   plugin: 'agent-monitor',
@@ -9,8 +9,9 @@ const PANE = {
 
 const SURFACES = ['terminal', 'desktop'] as const
 
-// Every text the pane shows, in order, Buttons' labels included.
-const texts = async (ui: { findAll: (q: object) => Promise<{ text?: string }[]> }) => (await ui.findAll({})).map(x => x.text ?? '').filter(Boolean)
+// Every text the pane shows, in order, Buttons' labels included; leaves only, so a Button holding a Text counts once.
+const texts = async (ui: { findAll: (q: object) => Promise<{ text?: string; children: unknown[] }[]> }) =>
+  (await ui.findAll({})).filter(x => x.children.every(c => typeof c === 'string')).map(x => x.text ?? '').filter(Boolean)
 
 const todo = (todos: { content: string; status: 'pending' | 'in_progress' | 'completed' }[]) =>
   ({ tool: 'TodoWrite', todos: todos.map(t => ({ ...t, activeForm: t.content })) }) as any
@@ -350,5 +351,49 @@ test('PostToolUse reads the transcript into Main tokens, model and cost', async 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   // 1000 in at $3/M + 1000 out at $15/M = $0.018, counted once for the repeated id.
   expect((await texts(ui)).some(x => /Main · claude-sonnet-4 · 2.0k tok$/.test(x))).toBe(true)
+  await ui.unmount()
+})
+
+test('every row truncates, so a long line never pushes an agent\'s tasks out of the box', async ($, on) => {
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5-with-a-very-long-model-name' }) as any)
+  on('classic.SubagentStart', () => ({}) as any)
+  on('tool.call', () => ({ result: {} }) as any)
+  await $.tool.call(todo([{ content: `1 ${'a very long step title '.repeat(6)}`, status: 'in_progress' }, { content: '  1.1 sub', status: 'pending' }]))
+  await $.agent.spawn(spawn({ description: 'step 1.1', name: 'Zed' }))
+  await $.classic.SubagentStart({ agent_id: 'a1', agent_type: 'general-purpose' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'x'.repeat(200), agentId: 'a1' } as any)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const all = await ui.findAll({ type: 'Text' })
+    expect(all.length).toBeGreaterThan(5)
+    expect(all.filter(x => x.props.wrap !== 'truncate-end').map(x => x.text)).toEqual([])
+    await ui.unmount()
+  }
+})
+
+test('folding one agent folds only that agent, even when two spawns share a tool_use_id or millisecond', async ($, on) => {
+  mock.clock(on)
+  on('agent.spawn', () => ({ model: 'opus' }) as any)
+  on('classic.SubagentStart', () => ({}) as any)
+  on('tool.call', () => ({ result: {} }) as any)
+  await $.tool.call(todo([{ content: '1 A', status: 'pending' }, { content: '2 B', status: 'pending' }]))
+  await $.agent.spawn(spawn({ tool_use_id: '', description: 'step 1', name: 'Ann' }))
+  await $.agent.spawn(spawn({ tool_use_id: '', description: 'step 2', name: 'Ben' }))
+  await $.agent.spawn(spawn({ tool_use_id: 'tu9', description: 'r', name: 'Cid' }))
+  await $.agent.spawn(spawn({ tool_use_id: 'tu9', description: 'r', name: 'Dan' }))
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const rows = async () => (await texts(ui)).map(x => x.trim())
+  const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /^agent-(?!main)/.test(k ?? ''))
+  expect(new Set(keys).size).toBe(4)
+  await ui.press({ key: keys[0] as string })
+  const r = await rows()
+  expect(r).toContain('▸ ● Ann · opus')
+  expect(r).toContain('▾ ● Ben · opus')
+  expect(r).toContain('☰ 2 B')
+  expect(r).not.toContain('☰ 1 A')
+  await ui.press({ key: keys[3].replace('agent-', 'rm-') })
+  expect((await rows()).filter(x => /● (Cid|Dan) /.test(x))).toEqual(['● Cid · opus'])
   await ui.unmount()
 })

@@ -203,16 +203,15 @@ export const register: Register = on => {
     const task = named[0]?.content ?? plan.find(t => t.status === 'in_progress' && !t.owner)?.content
     // tool_use_id can be empty for a resumed run; every Button needs a non-empty key.
     // An unnamed agent gets a random first name, one not already on the list while any are left.
-    const id = e.tool_use_id || `spawn-${await $.clock.now()}`
-    // Assigning an agent starts its step, so the Assigned section picks it up.
-    // A step the agent was given by name becomes its own (unless already owned); a guessed one stays unowned.
-    const owned = new Set(named.map(t => t.content))
-    const given = new Set([...owned, ...(task ? [task] : [])])
-    await update($, steps, old =>
-      old.map(t => (given.has(t.content) ? { ...t, owner: owned.has(t.content) ? t.owner ?? id : t.owner, status: t.status === 'pending' ? 'in_progress' as const : t.status } : t)),
-    )
+    const base = e.tool_use_id || `spawn-${await $.clock.now()}`
+    // The id keys the row's fold and buttons, so it is made unique inside the update: a resumed run, or two in the same
+    // millisecond, would otherwise share one, and folding or removing either would hit both.
+    let id = base
     // The name is picked inside the update, so parallel spawns (retried on a version clash) never share one.
     await update($, agents, list => {
+      const ids = new Set(list.map(a => a.id))
+      id = base
+      for (let n = 2; ids.has(id); n++) id = `${base}-${n}`
       const used = new Set(list.map(a => a.name))
       const free = NAMES.filter(n => !used.has(n))
       const pool = free.length ? free : NAMES
@@ -221,6 +220,13 @@ export const register: Register = on => {
 
       return [...list, run].slice(-50)
     })
+    // Assigning an agent starts its step, so the Assigned section picks it up.
+    // A step the agent was given by name becomes its own (unless already owned); a guessed one stays unowned.
+    const owned = new Set(named.map(t => t.content))
+    const given = new Set([...owned, ...(task ? [task] : [])])
+    await update($, steps, old =>
+      old.map(t => (given.has(t.content) ? { ...t, owner: owned.has(t.content) ? t.owner ?? id : t.owner, status: t.status === 'pending' ? 'in_progress' as const : t.status } : t)),
+    )
 
     return next(e)
   })
@@ -338,6 +344,12 @@ export const register: Register = on => {
     const [runs, plan] = [await read($, agents), await read($, steps)]
     const fold = await read($, folded)
     const open = await read($, opened)
+    // Each line in a box is one row: the box's height counts lines, so a wrapped line would push the rows under it out of view.
+    const line = (key: string, text: string, onPress: () => unknown) => (
+      <Button plain key={key} onPress={onPress}>
+        <Text wrap="truncate-end">{text}</Text>
+      </Button>
+    )
     const toggle = (k: 'plan' | 'agents') => () => update($, folded, f => ({ ...f, [k]: !f[k] }))
     const live = runs.filter(a => !a.isDone)
     // Assigned = steps a running agent has, or that Main has (in progress, no agent); empty when nobody is on any.
@@ -359,16 +371,12 @@ export const register: Register = on => {
       const icon = blocked ? '⊘' : MARK[st]
       const key = `pc-${path}`
       if (!n.kids.length) {
-        return [<Text dimColor={st === 'completed'} color={blocked ? 'red' : undefined}>{`${pad}  ${icon} ${label}`}</Text>]
+        return [<Text wrap="truncate-end" dimColor={st === 'completed'} color={blocked ? 'red' : undefined}>{`${pad}  ${icon} ${label}`}</Text>]
       }
       const done = leaves(n).filter(x => x === 'completed').length
 
       return [
-        <Button plain
-          key={key}
-          label={`${pad}${open[key] ? '▸' : '▾'} ${icon} ${label} (${done}/${leaves(n).length})`}
-          onPress={() => update($, opened, o => ({ ...o, [key]: !o[key] }))}
-        />,
+        line(key, `${pad}${open[key] ? '▸' : '▾'} ${icon} ${label} (${done}/${leaves(n).length})`, () => update($, opened, o => ({ ...o, [key]: !o[key] }))),
         ...(open[key] ? [] : n.kids.flatMap((k, i) => node(k, `${path}.${i}`, depth + 1))),
       ]
     }
@@ -410,7 +418,7 @@ export const register: Register = on => {
             key={`agent-${a.id}`}
             onPress={() => update($, opened, o => ({ ...o, [a.id]: !(o[a.id] ?? true) }))}
           >
-            <Text color={tone} strikethrough={a.state === 'killed'}>
+            <Text wrap="truncate-end" color={tone} strikethrough={a.state === 'killed'}>
               {`${pad}  ${hasMore ? (isOpen ? '▾' : '▸') : ' '} ${a.isDone ? '✔' : isMain && !a.doing ? '○' : '●'} ${a.name}${a.model ? ` · ${a.model}${a.effort ? ` (${a.effort})` : ''}` : ''}${a.tokens ? ` · ${kilo(a.tokens)} tok` : ''}`}
             </Text>
           </Button>
@@ -420,7 +428,7 @@ export const register: Register = on => {
           {a.agentId && !a.isDone && <Button plain key={`kill-${a.id}`} label=" ■" onPress={() => kill(a)} />}
           {!isMain && <Button plain key={`rm-${a.id}`} label=" ✕" onPress={() => update($, agents, l => l.filter(x => x.id !== a.id))} />}
         </Box>,
-        ...(isOpen && skills.length ? [<Text dimColor>{`${pad}      ⚙ ${skills.join(', ')}`}</Text>] : []),
+        ...(isOpen && skills.length ? [<Text wrap="truncate-end" dimColor>{`${pad}      ⚙ ${skills.join(', ')}`}</Text>] : []),
         ...(isOpen ? tasks.flatMap((task, i) => {
           // Each task folds its own calls; calls filed under no listed task show under the agent.
           const mine = log.filter(l => l.task === task)
@@ -428,17 +436,13 @@ export const register: Register = on => {
           const done = (a.isDone && task === a.task) || plan.some(t => t.content === task && t.status === 'completed')
 
           return [
-            <Button plain
-              key={`task-${a.id}-${i}`}
-              label={`${pad}    ${mine.length ? (open[k] ? '▾' : '▸') : ' '} ${done ? '✔' : '☰'} ${task}`}
-              onPress={() => update($, opened, o => ({ ...o, [k]: !o[k] }))}
-            />,
-            ...(open[k] ? mine.map(l => <Text dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>) : []),
+            line(`task-${a.id}-${i}`, `${pad}    ${mine.length ? (open[k] ? '▾' : '▸') : ' '} ${done ? '✔' : '☰'} ${task}`, () => update($, opened, o => ({ ...o, [k]: !o[k] }))),
+            ...(open[k] ? mine.map(l => <Text wrap="truncate-end" dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>) : []),
           ]
         }) : []),
-        ...(a.doing && !a.isDone ? [<Text dimColor>{`${pad}        ↳ ${a.doing}`}</Text>] : []),
+        ...(a.doing && !a.isDone ? [<Text wrap="truncate-end" dimColor>{`${pad}        ↳ ${a.doing}`}</Text>] : []),
         ...(isOpen ? log.filter(l => !l.task || !tasks.includes(l.task)).map(l => (
-          <Text dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>
+          <Text wrap="truncate-end" dimColor>{`${pad}        ${a.isDone || l !== log[log.length - 1] ? '✔' : '…'} ${l.line}`}</Text>
         )) : []),
         ...(isOpen ? sub.flatMap(c => row(c, depth + 1)) : []),
       ]
@@ -448,18 +452,14 @@ export const register: Register = on => {
     const planLines: unknown[] = [
       ...(now.length > 0
         ? [
-            <Button plain
-              key="assigned"
-              label={`  ${open.assigned ? '▸' : '▾'} Assigned (${now.length})`}
-              onPress={() => update($, opened, o => ({ ...o, assigned: !o.assigned }))}
-            />,
+            line('assigned', `  ${open.assigned ? '▸' : '▾'} Assigned (${now.length})`, () => update($, opened, o => ({ ...o, assigned: !o.assigned }))),
           ]
         : []),
       ...(open.assigned ? [] : now.flatMap(n => [
-        <Text color="green">{`    ▶ ${n.text}`}</Text>,
-        ...whoHas(n.step).map(name => <Text dimColor>{`        ● ${name}`}</Text>),
+        <Text wrap="truncate-end" color="green">{`    ▶ ${n.text}`}</Text>,
+        ...whoHas(n.step).map(name => <Text wrap="truncate-end" dimColor>{`        ● ${name}`}</Text>),
       ])),
-      ...(plan.length === 0 ? [<Text dimColor>  no todo list yet</Text>] : []),
+      ...(plan.length === 0 ? [<Text wrap="truncate-end" dimColor>  no todo list yet</Text>] : []),
       ...treeOf(plan).flatMap((n, i) => node(n, String(i), 0)),
     ]
     const total = (mainState.cost ?? 0) + runs.reduce((t, a) => t + (a.cost ?? 0), 0)
@@ -480,7 +480,7 @@ export const register: Register = on => {
             <Button plain key={k} label={`${fold[k] ? '▸' : '▾'} ${title}`} onPress={toggle(k)} />
             <Button plain key={`${k}-less`} label=" －" onPress={resize(-3)} />
             <Button plain key={`${k}-more`} label=" ＋" onPress={resize(3)} />
-            {lines.length > hh && <Text dimColor>{` ${start + 1}-${start + hh}/${lines.length}`}</Text>}
+            {lines.length > hh && <Text wrap="truncate-end" dimColor>{` ${start + 1}-${start + hh}/${lines.length}`}</Text>}
           </Box>
           {!fold[k] && (
             <Box flexDirection="column" height={hh + 2} overflow="hidden" borderStyle="round" borderDimColor>
