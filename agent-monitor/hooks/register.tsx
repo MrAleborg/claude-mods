@@ -136,14 +136,43 @@ const addKids = (old: Step[], n: string, kids: Step[]) => {
   return at < 0 ? old : [...old.slice(0, at + 1), ...fresh, ...old.slice(at + 1)]
 }
 
+type Issue = { number: number; title: string; body?: string; blockedBy?: { nodes: { number: number; state: string }[] } }
+const ISSUES = 'query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){issues(states:OPEN,first:50,orderBy:{field:CREATED_AT,direction:ASC}){nodes{number title body blockedBy(first:20){nodes{number state}}}}}}'
+
+// An issue's open blockers among the open issues: GitHub's "blocked by" links, plus "blocked by #5" or "depends on #5, #6" in its body.
+const blockersOf = (i: Issue, open: Set<number>) => {
+  const said = [...(i.body ?? '').matchAll(/\b(?:blocked by|depends on)\b((?:[\s,]*(?:and\s+)?#\d+)+)/gi)].flatMap(m => m[1].match(/\d+/g)!.map(Number))
+  const linked = (i.blockedBy?.nodes ?? []).filter(b => b.state === 'OPEN').map(b => b.number)
+
+  return [...new Set([...linked, ...said])].filter(n => open.has(n) && n !== i.number)
+}
+
+// Ready issues first, then each wave whose blockers all come earlier; issues in a blocking cycle go last. Order within a wave is kept.
+const readyFirst = (issues: Issue[]) => {
+  const open = new Set(issues.map(i => i.number))
+  const by = new Map(issues.map(i => [i.number, blockersOf(i, open)]))
+  const out: Issue[] = []
+  let left = issues
+  while (left.length) {
+    const placed = new Set(out.map(i => i.number))
+    const wave = left.filter(i => by.get(i.number)!.every(b => placed.has(b)))
+    if (!wave.length) break
+    out.push(...wave)
+    left = left.filter(i => !wave.includes(i))
+  }
+
+  return { order: [...out, ...left], by }
+}
+
 const seedFromIssues = async ($: any) => {
   if ((await read($, steps)).length) return
-  const r = await $.process.run(['gh', 'issue', 'list', '--state', 'open', '--json', 'number,title,body', '--limit', '50'])
+  const r = await $.process.run(['gh', 'api', 'graphql', '-f', `query=${ISSUES}`, '-F', 'owner={owner}', '-F', 'repo={repo}'])
   if (r.exitCode !== 0) return
-  const found: { number: number; title: string; body?: string }[] = JSON.parse(r.stdout)
+  const { order: found, by } = readyFirst(JSON.parse(r.stdout).data.repository.issues.nodes as Issue[])
   if (!found.length) return
+  const at = new Map(found.map((i, x) => [i.number, x + 1]))
   const plan = found.flatMap((i, x) => [
-    { id: String(i.number), content: `${x + 1}. #${i.number} ${i.title}`, status: 'pending' as const },
+    { id: String(i.number), content: `${x + 1}. #${i.number} ${i.title}${by.get(i.number)!.length ? ` (blocked by ${by.get(i.number)!.map(b => at.get(b)).join(', ')})` : ''}`, status: 'pending' as const },
     ...[...(i.body ?? '').matchAll(CHECK)].map((m, k) => ({ content: `${x + 1}.${k + 1} ${m[2].trim()}`, status: m[1] === ' ' ? 'pending' as const : 'completed' as const })),
   ])
   let isSeeded = false

@@ -405,7 +405,7 @@ test('/monitor builds a tree from open issues: checklist items under theirs, an 
   ]
   const prompts: string[] = []
   on('ui.open', () => ({ value: { isPlaced: true } }) as any)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(issues), stderr: '' } }) as any)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify({ data: { repository: { issues: { nodes: issues } } } }), stderr: '' } }) as any)
   on('agent.spawn', (_: any, e: any) => (prompts.push(e.prompt), { model: 'haiku', agentId: 'split1' }) as any)
   on('clock.now', () => ({ value: 1 }) as any)
   on('turn.complete', () => ({ text: '' }) as any)
@@ -433,4 +433,25 @@ test('/monitor builds a tree from open issues: checklist items under theirs, an 
   expect(prompts.length).toBe(1)
   const out = await $.tool.call({ tool: PLAN_STEP, step: '12', status: 'completed' } as any)
   expect((out as { result?: string }).result).toBe('Step 12 is now completed.')
+})
+
+test('issues are ordered ready first; a blocked one says by which step, from GitHub links or its body', async ($, on) => {
+  const issues = [
+    { number: 1, title: 'Ship it', body: 'Depends on #2 and #3.\n- [ ] Release', blockedBy: { nodes: [] } },
+    { number: 2, title: 'Build API', body: '- [ ] Routes', blockedBy: { nodes: [{ number: 3, state: 'OPEN' }, { number: 99, state: 'CLOSED' }] } },
+    { number: 3, title: 'Schema', body: '- [ ] Tables', blockedBy: { nodes: [] } },
+  ]
+  on('ui.open', () => ({ value: { isPlaced: true } }) as any)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify({ data: { repository: { issues: { nodes: issues } } } }), stderr: '' } }) as any)
+
+  await $.command.run({ command: 'monitor', args: '' } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const t = await texts(ui)
+  const at = (re: RegExp) => t.findIndex(x => re.test(x))
+  expect(at(/○ #3 Schema \(0\/1\)/)).toBeGreaterThan(-1)
+  expect(at(/#3 Schema/)).toBeLessThan(at(/#2 Build API/))
+  expect(at(/#2 Build API/)).toBeLessThan(at(/#1 Ship it/))
+  expect(t.some(x => /⊘ #2 Build API \(blocked by 1\)/.test(x))).toBe(true)
+  expect(t.some(x => /⊘ #1 Ship it \(blocked by 2, 1\)/.test(x))).toBe(true)
+  await ui.unmount()
 })
