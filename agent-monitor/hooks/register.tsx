@@ -121,6 +121,16 @@ const usd = (n: number) => `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`
 const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
 const addSkill = (list: string[] = [], s: string) => [...list.filter(x => x !== s), s].slice(-5)
 
+// An empty plan starts from the repo's open GitHub issues, one pending step each; the issue number is its id, so "task #12" or plan_step "12" reaches it.
+// shortcut: needs gh and a GitHub remote, else the plan stays empty; read once, so issues opened later are not added.
+const seedFromIssues = async ($: any) => {
+  if ((await read($, steps)).length) return
+  const r = await $.process.run(['gh', 'issue', 'list', '--state', 'open', '--json', 'number,title', '--limit', '50'])
+  if (r.exitCode !== 0) return
+  const found: { number: number; title: string }[] = JSON.parse(r.stdout)
+  await update($, steps, old => (old.length ? old : found.map(i => ({ id: String(i.number), content: `#${i.number} ${i.title}`, status: 'pending' as const }))))
+}
+
 const MARK = { completed: '✔', in_progress: '▶', pending: '○' } as const
 
 export const register: Register = on => {
@@ -137,6 +147,7 @@ export const register: Register = on => {
     })
     await $.command.register({ name: 'monitor-clear', description: 'Clear the plan and the agent list in the pane' })
     void $.ui.open({ id: PANE, title: 'Agents & plan' })
+    void seedFromIssues($).catch(() => {})
 
     return next(e)
   })
@@ -150,6 +161,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'monitor' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Agents & plan' })
+    await seedFromIssues($).catch(() => {})
 
     return { text: 'Agent monitor pane opened.' }
   })
