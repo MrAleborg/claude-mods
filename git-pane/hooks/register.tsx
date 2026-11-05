@@ -44,9 +44,30 @@ const isIssuesOpen = atom(
   true,
   { shape: 'issues-open-1' },
 )
+const openIssues = atom({ plugin: 'git-pane', key: 'openIssues' } as const, [] as number[], {
+  shape: 'open-issues-1',
+})
 
 const MAX_DIFF = 20000
 const MAX_UNTRACKED = 500
+
+type IssueRow = Issues['items'][number] & { depth: number; hasKids: boolean }
+
+// Issues nested under their open parent; a sub-issue whose parent is closed or not fetched is a root.
+const issueTree = (items: Issues['items'], expanded: number[]): IssueRow[] => {
+  const known = new Set(items.map(i => i.number))
+  const kids = (p: number | null) => items.filter(i => (i.parent !== null && known.has(i.parent) ? i.parent : null) === p)
+  const rows: IssueRow[] = []
+  const walk = (p: number | null, depth: number) => {
+    for (const i of kids(p)) {
+      const hasKids = items.some(c => c.parent === i.number)
+      rows.push({ ...i, depth, hasKids })
+      if (hasKids && expanded.includes(i.number)) walk(i.number, depth + 1)
+    }
+  }
+  walk(null, 0)
+  return rows
+}
 
 type Node = { dirs: Map<string, Node>; files: string[] }
 type TreeRow = { isDir: boolean; path: string; name: string; depth: number }
@@ -167,17 +188,24 @@ const refresh = async ($: any) => {
   }))
 }
 
+// gh issue list has no parent field, so GraphQL; gh fills {owner}/{repo} from the current repo
+const ISSUES_QUERY = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){
+  issues(states:OPEN,first:30,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number title parent{number} labels(first:10){nodes{name}}}}}}`
+
 // Open GitHub issues via gh; kept out of refresh since it hits the network.
 const refreshIssues = async ($: any) => {
-  const r = await $.process.run(['gh', 'issue', 'list', '--json', 'number,title,labels', '--limit', '30'])
+  const r = await $.process.run([
+    'gh', 'api', 'graphql', '-F', 'owner={owner}', '-F', 'repo={repo}', '-f', `query=${ISSUES_QUERY}`,
+  ])
   let items: Issues['items'] = []
   try {
     if (r.exitCode === 0) {
-      items = JSON.parse(r.stdout).map((i: any) => ({
+      items = JSON.parse(r.stdout).data.repository.issues.nodes.map((i: any) => ({
         number: i.number,
         title: i.title,
-        labels: i.labels.map((l: any) => l.name),
-      })).sort((a: any, b: any) => a.number - b.number) // gh lists newest first; show newest last
+        labels: i.labels.nodes.map((l: any) => l.name),
+        parent: i.parent?.number ?? null,
+      })).sort((a: any, b: any) => a.number - b.number) // newest last
     }
   } catch {}
   await update($, issues, () => ({ isAvailable: r.exitCode === 0, items }))
@@ -255,6 +283,7 @@ export const register: Register = on => {
     const untrackedRows = tree(g.untracked, closed)
     const gh = await read($, issues)
     const isIssues = await read($, isIssuesOpen)
+    const expanded = await read($, openIssues)
 
     if (!g.isRepo) {
       return <Text dimColor>Not a git repository.</Text>
@@ -395,12 +424,34 @@ export const register: Register = on => {
         {isIssues && !gh.isAvailable && <Text dimColor>{'  '}gh unavailable or no GitHub remote.</Text>}
         {isIssues && gh.isAvailable && gh.items.length === 0 && <Text dimColor>{'  '}No open issues.</Text>}
         {isIssues &&
-          gh.items.map(i => (
-            <Text key={`issue:${i.number}`}>
-              <Text dimColor>{'  '}#{i.number}</Text> {i.title}
-              {i.labels.length > 0 && <Text color="cyan"> [{i.labels.join(', ')}]</Text>}
-            </Text>
-          ))}
+          issueTree(gh.items, expanded).map(i => {
+            const body = (
+              <Text>
+                <Text dimColor>
+                  {'  '.repeat(i.depth + 1)}
+                  {i.hasKids ? (expanded.includes(i.number) ? '▾ ' : '▸ ') : '  '}#{i.number}
+                </Text>{' '}
+                {i.title}
+                {i.labels.length > 0 && <Text color="cyan"> [{i.labels.join(', ')}]</Text>}
+              </Text>
+            )
+
+            return i.hasKids ? (
+              <Button
+                key={`issue:${i.number}`}
+                plain
+                onPress={() =>
+                  update($, openIssues, list =>
+                    list.includes(i.number) ? list.filter(x => x !== i.number) : [...list, i.number],
+                  )
+                }
+              >
+                {body}
+              </Button>
+            ) : (
+              <Box key={`issue:${i.number}`}>{body}</Box>
+            )
+          })}
       </Box>
     )
   })

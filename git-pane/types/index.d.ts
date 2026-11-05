@@ -8,7 +8,7 @@ export type GitInfo = {
 
 export type Issues = {
   isAvailable: boolean
-  items: { number: number; title: string; labels: string[] }[]
+  items: { number: number; title: string; labels: string[]; parent: number | null }[]
 }
 
 declare module 'claude-code' {
@@ -23,6 +23,7 @@ declare module 'claude-code' {
       isGraphOpen: Shaped<boolean>
       issues: Shaped<Issues>
       isIssuesOpen: Shaped<boolean>
+      openIssues: Shaped<number[]>
     }
   }
 }

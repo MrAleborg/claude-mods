@@ -30,6 +30,8 @@ const DIFF = [
   '',
 ].join('\n')
 
+const gql = (nodes: any[]) => JSON.stringify({ data: { repository: { issues: { nodes } } } })
+
 // Answers each git command by its argv; `over` replaces a subcommand's answer.
 const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
   const calls: string[][] = []
@@ -44,7 +46,10 @@ const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
       case 'diff': return { value: ok(argv.at(-1) === 'src/a.ts' ? DIFF : '@@ -0,0 +1 @@\n+new\n') }
       case 'ls-files': return { value: ok('notes/todo.md\0x.txt\0') }
       case 'log': return { value: ok('* abc123 (HEAD -> main) first\n') }
-      case 'gh': return { value: ok('[{"number":9,"title":"Newer","labels":[]},{"number":7,"title":"Parser crash","labels":[{"name":"bug"}]}]') }
+      case 'gh': return { value: ok(gql([
+        { number: 9, title: 'Newer', labels: { nodes: [] }, parent: null },
+        { number: 7, title: 'Parser crash', labels: { nodes: [{ name: 'bug' }] }, parent: null },
+      ])) }
     }
     return { value: fail() }
   })
@@ -203,6 +208,32 @@ test('open GitHub issues are listed with labels and fold away', async ($, on) =>
   expect(rows.findIndex(x => x.includes('#7'))).toBeLessThan(rows.findIndex(x => x.includes('#9')))
   await ui.press({ key: 'issues' })
   expect(await ui.find({ type: 'Text', text: /#7/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('sub-issues sit folded under their parent and expand on press', async ($, on) => {
+  engine(on)
+  git(on, {
+    gh: () => ok(gql([
+      { number: 5, title: 'Epic', labels: { nodes: [] }, parent: null },
+      { number: 6, title: 'Child', labels: { nodes: [] }, parent: { number: 5 } },
+      { number: 8, title: 'Grandchild', labels: { nodes: [] }, parent: { number: 6 } },
+      { number: 4, title: 'Orphan', labels: { nodes: [] }, parent: { number: 1 } }, // parent closed
+    ])),
+  })
+  await $.command.run({ command: 'git-pane' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'issues' }))?.text).toContain('Issues (4)')
+  expect((await ui.find({ type: 'Text', text: /#4 Orphan/ }))?.text).toBeDefined()
+  expect((await ui.find({ key: 'issue:5' }))?.text).toContain('▸ #5 Epic')
+  expect(await ui.find({ type: 'Text', text: /Child/ })).toBeUndefined()
+  await ui.press({ key: 'issue:5' })
+  expect((await ui.find({ key: 'issue:6' }))?.text).toMatch(/^\s{4}▸ #6 Child/)
+  expect(await ui.find({ type: 'Text', text: /Grandchild/ })).toBeUndefined()
+  await ui.press({ key: 'issue:6' })
+  expect((await ui.find({ type: 'Text', text: /#8 Grandchild/ }))?.text).toMatch(/^\s{8}#8/)
+  await ui.press({ key: 'issue:5' })
+  expect(await ui.find({ type: 'Text', text: /Child/ })).toBeUndefined()
   await ui.unmount()
 })
 
