@@ -1,1 +1,1 @@
-{ "name": "git-pane", "version": "0.3.6", "description": "Right pane: current branch, per-file diff tabs, expandable git graph, GitHub issues as a sub-issue tree", "types": "./types/index.d.ts" }
+{ "name": "git-pane", "version": "0.3.7", "description": "Right pane: current branch, per-file diff tabs, expandable git graph, GitHub issues as a sub-issue tree and blockers", "types": "./types/index.d.ts" }

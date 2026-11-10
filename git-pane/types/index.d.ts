@@ -8,7 +8,7 @@ export type GitInfo = {
 
 export type Issues = {
   isAvailable: boolean
-  items: { number: number; title: string; labels: string[]; parent: number | null }[]
+  items: { number: number; title: string; labels: string[]; parent: number | null; blockedBy: number[] }[]
 }
 
 declare module 'claude-code' {

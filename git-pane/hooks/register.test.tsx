@@ -30,7 +30,8 @@ const DIFF = [
   '',
 ].join('\n')
 
-const gql = (nodes: any[]) => JSON.stringify({ data: { repository: { issues: { nodes } } } })
+const gql = (nodes: any[]) =>
+  JSON.stringify({ data: { repository: { issues: { nodes: nodes.map(n => ({ blockedBy: { nodes: [] }, ...n })) } } } })
 
 // Answers each git command by its argv; `over` replaces a subcommand's answer.
 const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
@@ -234,6 +235,22 @@ test('sub-issues sit folded under their parent and expand on press', async ($, o
   expect((await ui.find({ type: 'Text', text: /#8 Grandchild/ }))?.text).toMatch(/^\s{8}#8/)
   await ui.press({ key: 'issue:5' })
   expect(await ui.find({ type: 'Text', text: /Child/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('blocked issues name their open blockers', async ($, on) => {
+  engine(on)
+  git(on, {
+    gh: () => ok(gql([
+      { number: 2, title: 'Base', labels: { nodes: [] }, parent: null },
+      { number: 3, title: 'Waits', labels: { nodes: [] }, parent: null,
+        blockedBy: { nodes: [{ number: 2, state: 'OPEN' }, { number: 1, state: 'CLOSED' }, { number: 9, state: 'OPEN' }] } },
+    ])),
+  })
+  await $.command.run({ command: 'git-pane' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'issue:3' }))?.text).toContain('blocked by #2, #9')
+  expect((await ui.find({ key: 'issue:2' }))?.text).not.toContain('blocked')
   await ui.unmount()
 })
 
