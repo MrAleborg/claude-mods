@@ -37,7 +37,7 @@ const isGraphOpen = atom(
 const issues = atom(
   { plugin: 'git-pane', key: 'issues' } as const,
   { isAvailable: false, items: [] } as Issues,
-  { shape: 'issues-1' },
+  { shape: 'issues-2' },
 )
 const isIssuesOpen = atom(
   { plugin: 'git-pane', key: 'isIssuesOpen' } as const,
@@ -190,7 +190,7 @@ const refresh = async ($: any) => {
 
 // gh issue list has no parent field, so GraphQL; gh fills {owner}/{repo} from the current repo
 const ISSUES_QUERY = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){
-  issues(states:OPEN,first:30,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number title parent{number} labels(first:10){nodes{name}}}}}}`
+  issues(states:OPEN,first:30,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number title parent{number} blockedBy(first:10){nodes{number state}} labels(first:10){nodes{name}}}}}}`
 
 // Open GitHub issues via gh; kept out of refresh since it hits the network.
 const refreshIssues = async ($: any) => {
@@ -205,6 +205,7 @@ const refreshIssues = async ($: any) => {
         title: i.title,
         labels: i.labels.nodes.map((l: any) => l.name),
         parent: i.parent?.number ?? null,
+        blockedBy: i.blockedBy.nodes.filter((b: any) => b.state === 'OPEN').map((b: any) => b.number), // closed blockers no longer block
       })).sort((a: any, b: any) => a.number - b.number) // newest last
     }
   } catch {}
@@ -432,6 +433,7 @@ export const register: Register = on => {
                   {i.hasKids ? (expanded.includes(i.number) ? '▾ ' : '▸ ') : '  '}#{i.number}
                 </Text>{' '}
                 {i.title}
+                {i.blockedBy.length > 0 && <Text color="red"> ⊘ blocked by {i.blockedBy.map(n => `#${n}`).join(', ')}</Text>}
                 {i.labels.length > 0 && <Text color="cyan"> [{i.labels.join(', ')}]</Text>}
               </Text>
             )
