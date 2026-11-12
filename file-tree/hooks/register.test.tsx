@@ -13,11 +13,14 @@ const EDITOR = { plugin: 'file-tree', component: 'Pane', requestId: 'file-editor
 const SURFACES = ['terminal', 'desktop'] as const
 
 // The engine beneath the mod: git's file list, a file system in memory, and a log of UI calls.
+// As git prints a name without -z: one with non-ASCII bytes quoted, each such byte in octal.
+const quote = (p: string) =>
+  /[^\x00-\x7f]/.test(p) ? `"${[...new TextEncoder().encode(p)].map(b => (b > 127 ? `\\${b.toString(8)}` : String.fromCharCode(b))).join('')}"` : p
 const world = (on: any, paths: string[] | null, disk: Record<string, string> = {}) => {
   const log = { argv: [] as string[][], opened: [] as string[], closed: [] as string[], toasts: [] as string[] }
   on('process.run', (_: any, e: any) => {
     log.argv.push([...e.argv])
-    return { value: paths ? { exitCode: 0, stdout: paths.join('\n') + '\n', stderr: '' } : { exitCode: 128, stdout: '', stderr: 'not a git repository' } }
+    return { value: paths ? { exitCode: 0, stdout: e.argv.includes('-z') ? paths.map(x => x + '\0').join('') : paths.map(quote).join('\n') + '\n', stderr: '' } : { exitCode: 128, stdout: '', stderr: 'not a git repository' } }
   })
   // $.fs resolves a relative path against the project folder; the disk is keyed relative.
   const rel = (p: string) => Object.keys(disk).find(k => p === k || p.endsWith('/' + k)) ?? p
@@ -67,7 +70,15 @@ test('outside git (or nothing listed) the pane says No files.', async ($, on) =>
 test('ignored files are left to git; empty folders cannot show', async ($, on) => {
   const log = world(on, ['a.ts'])
   await start($)
-  expect(log.argv[0]).toEqual(['git', 'ls-files', '--cached', '--others', '--exclude-standard'])
+  expect(log.argv[0]).toEqual(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'])
+})
+
+test('a non-ASCII file name shows as written, not quoted by git', async ($, on) => {
+  world(on, ['é.txt'])
+  await start($)
+  const ui = await $.ui.mount({ ...TREE, surface: 'terminal' })
+  expect(await labels(ui)).toEqual(['  é.txt'])
+  await ui.unmount()
 })
 
 test('selecting a file opens the editor; typing and ctrl+s saves it and clears the edit', async ($, on) => {

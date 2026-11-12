@@ -44,7 +44,7 @@ const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
     switch (key) {
       case 'rev-parse': return { value: ok('main\n') }
       case 'names': return { value: ok('M\0src/a.ts\0A\0b.txt\0') }
-      case 'diff': return { value: ok(argv.at(-1) === 'src/a.ts' ? DIFF : '@@ -0,0 +1 @@\n+new\n') }
+      case 'diff': return { value: ok(argv.at(-1) === ':(top)src/a.ts' ? DIFF : '@@ -0,0 +1 @@\n+new\n') }
       case 'ls-files': return { value: ok('notes/todo.md\0x.txt\0') }
       case 'log': return { value: ok('* abc123 (HEAD -> main) first\n') }
       case 'gh': return { value: ok(gql([
@@ -139,7 +139,7 @@ test('a non-ASCII path git quotes is diffed by its real name', async ($, on) => 
   const calls = git(on, { names: () => ok('M\0café.txt\0') })
   await start($)
   const diffs = calls.filter(c => c[1] === 'diff' && !c.includes('--name-status'))
-  expect(diffs.map(c => c.at(-1))).toEqual(['café.txt'])
+  expect(diffs.map(c => c.at(-1))).toEqual([':(top)café.txt'])
 })
 
 test('/clear reopens and refills the pane', async ($, on) => {

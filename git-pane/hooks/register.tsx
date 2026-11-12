@@ -173,7 +173,8 @@ const refresh = async ($: any) => {
     const status = parts[i]
     i += /^[RC]/.test(status) ? 3 : 2
     const path = parts[i - 1]
-    const d = await git('diff', 'HEAD', '--', path)
+    // --name-status paths are from the repo root; :(top) reads them from there when the session runs in a subfolder
+    const d = await git('diff', 'HEAD', '--', `:(top)${path}`)
     files.push({ path, status, diff: d.stdout.slice(0, MAX_DIFF) })
   }
   const other = await git('ls-files', '--others', '--exclude-standard', '-z')

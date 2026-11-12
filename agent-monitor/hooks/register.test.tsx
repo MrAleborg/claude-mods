@@ -393,8 +393,10 @@ test('the final reply is read on Stop for Main and on SubagentStop for an agent'
   await ui.unmount()
 })
 
-test('a kill whose TaskStop fails leaves the agent running', async ($, on) => {
+test('a kill whose TaskStop fails leaves a running agent running, and a finished one done', async ($, on) => {
+  let status = 'running'
   on('tool.call', (_, e) => (e.tool === 'TaskStop' ? { result: 'no such task', isError: true } : { result: {} }) as any)
+  on('agent.list', () => ({ value: [{ id: 'a1', description: 'work', type: 'general-purpose', status }] }) as any)
   on('agent.spawn', () => ({ model: 'opus' }) as any)
   on('classic.SubagentStart', () => ({}) as any)
   await $.agent.spawn(spawn({ name: 'Zed' }))
@@ -403,6 +405,47 @@ test('a kill whose TaskStop fails leaves the agent running', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'kill-tu1' })
   expect((await texts(ui)).some(x => /Agents \(1 running\)/.test(x))).toBe(true)
+  status = 'completed'
+  await ui.press({ key: 'kill-tu1' })
+  const t = await texts(ui)
+  expect(t.some(x => /Agents \(0 running\)/.test(x))).toBe(true)
+  expect(t.some(x => /✓ Zed/.test(x))).toBe(true)
+  await ui.unmount()
+})
+
+test('two agents started at once each keep the id their spawn returned', async ($, on) => {
+  let n = 0
+  // The second spawn's agent starts first, so the oldest-unpaired guess would swap them.
+  on('agent.spawn', async ($$: any, e: any) => {
+    const agentId = ++n === 1 ? 'a1' : 'a2'
+    if (n === 2) {
+      await $.classic.SubagentStart({ agent_id: 'a2', agent_type: 'general-purpose' } as any)
+      await $.classic.SubagentStart({ agent_id: 'a1', agent_type: 'general-purpose' } as any)
+    }
+    return { model: 'opus', agentId }
+  })
+  on('classic.SubagentStart', () => ({}) as any)
+  on('tool.call', () => ({ result: {} }) as any)
+  await $.agent.spawn(spawn({ tool_use_id: 't1', name: 'Ann' }))
+  await $.agent.spawn(spawn({ tool_use_id: 't2', name: 'Ben' }))
+  await $.tool.call({ tool: 'Bash', command: 'only-ben', agentId: 'a2' } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const t = (await texts(ui)).map(x => x.trim())
+  const ben = t.findIndex(x => /Ben/.test(x))
+  expect(t.slice(ben).some(x => /only-ben/.test(x))).toBe(true)
+  expect(t.slice(0, ben).some(x => /only-ben/.test(x))).toBe(false)
+  await ui.unmount()
+})
+
+test('an issue number in a prompt that mentions tasks does not claim a plan task', async ($, on) => {
+  on('agent.spawn', () => ({ model: 'opus' }) as any)
+  on('tool.call', (_, e) => (e.tool === 'TaskCreate' ? { result: { task: { id: '12', subject: 'Unrelated' } } } : { result: {} }) as any)
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Unrelated', description: '' } as any)
+  await $.agent.spawn(spawn({ description: 'work', prompt: 'Finish your task, then fix issue #12.', name: 'Zed' }))
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await texts(ui)).some(x => /☰ Unrelated/.test(x))).toBe(false)
   await ui.unmount()
 })
 

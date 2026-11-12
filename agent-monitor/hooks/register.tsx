@@ -34,10 +34,10 @@ const depthOf = (c: string) => {
 }
 
 // "Step 1.2 ..." or "[1.2] ..." in an agent's description or prompt names the plan step it works on;
-// once "task" is said, every "#6" names a task too ("plan tasks #6, #7 and #8").
+// "#6" names a task only in a list right after "task(s)" ("plan tasks #6, #7 and #8"), so an issue's "#12" elsewhere does not.
 const stepRefs = (text: string) => [
   ...[...text.matchAll(/(?:\bsteps?\s*|\btasks?\s*#?|^\s*\[)(\d+(?:\.\d+)*)/gim)].map(m => m[1] as string),
-  ...(/\btasks?\b/i.test(text) ? [...text.matchAll(/#(\d+)\b/g)].map(m => m[1] as string) : []),
+  ...[...text.matchAll(/\btasks?\s*((?:#\d+\b(?:\s*(?:,|and|&)\s*)?)+)/gi)].flatMap(m => [...(m[1] as string).matchAll(/#(\d+)/g)].map(n => n[1] as string)),
 ]
 const numberOf = (c: string) => /^ *(\d+(?:\.\d+)*)[.)]?\s/.exec(c)?.[1]
 
@@ -227,7 +227,18 @@ export const register: Register = on => {
       old.map(t => (given.has(t.content) ? { ...t, owner: owned.has(t.content) ? t.owner ?? id : t.owner, status: t.status === 'pending' ? 'in_progress' as const : t.status } : t)),
     )
 
-    return next(e)
+    // The result names the started agent, so the row takes its id from there; a row SubagentStart paired with it by
+    // guess (two spawns at once) gets this row's guess back.
+    const out = await next(e)
+    const agentId = (out as { agentId?: string }).agentId
+    if (agentId) {
+      await update($, agents, list => {
+        const mine = list.find(a => a.id === id)?.agentId
+        return list.map(a => (a.id === id ? { ...a, agentId } : a.agentId === agentId ? { ...a, agentId: mine } : a))
+      })
+    }
+
+    return out
   })
 
   on('tool.call', async ($, e, next) => {
@@ -389,8 +400,12 @@ export const register: Register = on => {
     // Marked killed before the stop, so the SubagentStop it raises does not complete the agent's step; undone if the stop fails.
     const kill = async (a: AgentRun) => {
       await update($, agents, l => l.map(x => (x.id === a.id ? { ...x, state: 'killed' as const, isDone: true } : x)))
-      const out = (await $.tool.call({ tool: 'TaskStop', task_id: a.agentId })) as { deny?: string; isError?: boolean }
-      if (out.deny || out.isError) await update($, agents, l => l.map(x => (x.id === a.id ? { ...x, state: undefined, isDone: false } : x)))
+      const out = (await $.tool.call({ tool: 'TaskStop', task_id: a.agentId }).catch(() => ({ isError: true }))) as { deny?: string; isError?: boolean }
+      if (out.deny || out.isError) {
+        // The stop also fails for an agent that already finished: only one the engine still runs goes back to running.
+        const live = (await $.agent.list().catch(() => [])).some(x => x.id === a.agentId && !['completed', 'failed', 'killed'].includes(x.status))
+        await update($, agents, l => l.map(x => (x.id === a.id ? { ...x, state: undefined, isDone: !live } : x)))
+      }
     }
     // running blue, paused yellow, done green, killed gray
     const toneOf = (a: AgentRun) => (a.id === 'main' ? (a.doing ? 'blue' : 'gray') : a.state === 'killed' ? 'gray' : a.state === 'paused' ? 'yellow' : a.isDone ? 'green' : 'blue')
