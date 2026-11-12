@@ -50,8 +50,9 @@ const tree = (paths: string[], open: string[]): TreeRow[] => {
 
 const refresh = async ($: any) => {
   // shortcut: git lists tracked + untracked-not-ignored files, so a project outside git shows nothing
-  const r = await $.process.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard'])
-  const list = r.exitCode === 0 ? r.stdout.split('\n').filter(Boolean) : []
+  // -z: names come unquoted, so a non-ASCII one is not escaped
+  const r = await $.process.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'])
+  const list = r.exitCode === 0 ? r.stdout.split('\0').filter(Boolean) : []
   await update($, files, () => [...new Set<string>(list)].slice(0, MAX_FILES))
 }
 
