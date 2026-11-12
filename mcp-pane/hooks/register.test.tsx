@@ -57,3 +57,16 @@ test('no MCP tools: says so', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /No MCP servers/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('tool rows truncate, so a long tool name never wraps', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'mcp-pane' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.list', () => ({ value: [{ name: `mcp__srv__${'a_very_long_tool_name_'.repeat(5)}`, description: '', mcp: true }] }))
+  await $.command.run({ command: 'mcp-pane', args: '' } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'srv' })
+  const rows = (await ui.findAll({ type: 'Text' })).filter(t => /a_very_long/.test(t.text ?? ''))
+  expect(rows.length).toBe(1)
+  expect(rows[0]?.props.wrap).toBe('truncate-end')
+  await ui.unmount()
+})

@@ -86,7 +86,7 @@ export const register: Register = on => {
                 update($, expanded, l => (l.includes(s.name) ? l.filter(x => x !== s.name) : [...l, s.name]))
               }
             />
-            {open.includes(s.name) && s.tools.map(t => <Text dimColor>{'    '}{t}</Text>)}
+            {open.includes(s.name) && s.tools.map(t => <Text key={`${s.name}:${t}`} dimColor wrap="truncate-end">{'    '}{t}</Text>)}
           </Box>
         ))}
       </Box>

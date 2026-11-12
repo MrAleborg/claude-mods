@@ -4,9 +4,9 @@ import type { Register } from 'claude-code'
 import type { GitInfo, Issues } from '../types'
 
 const PANE = 'git-pane'
-const empty: GitInfo = { isRepo: false, branch: '', files: [], untracked: [], graph: '' }
+const empty: GitInfo = { isRepo: false, branch: '', files: [], diff: { path: '', text: '' }, untracked: [], graph: '' }
 const info = atom({ plugin: 'git-pane', key: 'info' } as const, empty, {
-  shape: 'info-2',
+  shape: 'info-3',
 })
 const tab = atom({ plugin: 'git-pane', key: 'tab' } as const, '', {
   shape: 'tab-1',
@@ -36,8 +36,8 @@ const isGraphOpen = atom(
 )
 const issues = atom(
   { plugin: 'git-pane', key: 'issues' } as const,
-  { isAvailable: false, items: [] } as Issues,
-  { shape: 'issues-2' },
+  { isAvailable: false, total: 0, items: [] } as Issues,
+  { shape: 'issues-3' },
 )
 const isIssuesOpen = atom(
   { plugin: 'git-pane', key: 'isIssuesOpen' } as const,
@@ -151,11 +151,11 @@ const parse = (diff: string): Row[] => {
   return rows
 }
 
-const stats = (rows: Row[]) => ({
-  added: rows.filter(r => r.kind === '+').length,
-  deleted: rows.filter(r => r.kind === '-').length,
-})
+// "… 12 more lines" under a list cut to the room it has, so a cut never looks like the end.
+const more = (n: number, what = 'lines') => (n > 0 ? `… ${n} more ${what}` : '')
 
+// One diff per refresh, the selected file's; the counts of all files come from one --numstat, so the cost does not grow
+// with the number of changed files and a diff cut at MAX_DIFF does not skew them.
 const refresh = async ($: any) => {
   const git = (...args: string[]) => $.process.run(['git', ...args])
   // symbolic-ref names the branch even before the first commit; rev-parse covers a detached HEAD
@@ -168,15 +168,26 @@ const refresh = async ($: any) => {
   // -z: paths come unquoted, NUL-separated; a rename or copy (R100, C75) carries two paths
   const names = await git('diff', 'HEAD', '--name-status', '-z')
   const parts = names.stdout.split('\0').filter(Boolean)
+  // --numstat -z: "added\tdeleted\tpath", or "added\tdeleted\t" then old and new paths for a rename; "-" for binary
+  const num = (await git('diff', 'HEAD', '--numstat', '-z')).stdout.split('\0')
+  const counts = new Map<string, { added: number | null; deleted: number | null }>()
+  for (let i = 0; i < num.length; i++) {
+    const m = /^(\d+|-)\t(\d+|-)\t(.*)$/s.exec(num[i] as string)
+    if (!m) continue
+    const path = m[3] ? m[3] : ((i += 2), num[i] as string)
+    counts.set(path, { added: m[1] === '-' ? null : Number(m[1]), deleted: m[2] === '-' ? null : Number(m[2]) })
+  }
   const files: GitInfo['files'] = []
   for (let i = 0; i < parts.length; ) {
-    const status = parts[i]
+    const status = parts[i] as string
     i += /^[RC]/.test(status) ? 3 : 2
-    const path = parts[i - 1]
-    // --name-status paths are from the repo root; :(top) reads them from there when the session runs in a subfolder
-    const d = await git('diff', 'HEAD', '--', `:(top)${path}`)
-    files.push({ path, status, diff: d.stdout.slice(0, MAX_DIFF) })
+    const path = parts[i - 1] as string
+    files.push({ path, status, ...(counts.get(path) ?? { added: null, deleted: null }) })
   }
+  const wanted = await read($, tab)
+  const selected = files.find(f => f.path === wanted) ?? files[0]
+  // --name-status paths are from the repo root; :(top) reads them from there when the session runs in a subfolder
+  const d = selected ? await git('diff', 'HEAD', '--', `:(top)${selected.path}`) : { stdout: '' }
   const other = await git('ls-files', '--others', '--exclude-standard', '-z')
   const untracked = other.stdout.split('\0').filter(Boolean).slice(0, MAX_UNTRACKED)
   const log = await git('log', '--graph', '--oneline', '--decorate', '--all', '-n', '40')
@@ -184,33 +195,39 @@ const refresh = async ($: any) => {
     isRepo: true,
     branch: head.stdout.trim(),
     files,
+    diff: { path: selected?.path ?? '', text: d.stdout.slice(0, MAX_DIFF) },
     untracked,
     graph: log.stdout,
   }))
 }
 
 // gh issue list has no parent field, so GraphQL; gh fills {owner}/{repo} from the current repo
-const ISSUES_QUERY = `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){
-  issues(states:OPEN,first:30,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number title parent{number} blockedBy(first:10){nodes{number state}} labels(first:10){nodes{name}}}}}}`
+const issuesQuery = (extra: string) => `query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){
+  issues(states:OPEN,first:30,orderBy:{field:CREATED_AT,direction:DESC}){totalCount nodes{number title ${extra} labels(first:10){nodes{name}}}}}}`
+// Sub-issues and blockers are newer GitHub fields; where the API refuses them, the plain list still shows.
+const QUERIES = [issuesQuery('parent{number} blockedBy(first:10){nodes{number state}}'), issuesQuery('')]
 
 // Open GitHub issues via gh; kept out of refresh since it hits the network.
 const refreshIssues = async ($: any) => {
-  const r = await $.process.run([
-    'gh', 'api', 'graphql', '-F', 'owner={owner}', '-F', 'repo={repo}', '-f', `query=${ISSUES_QUERY}`,
-  ])
+  const ask = (query: string) => $.process.run(['gh', 'api', 'graphql', '-F', 'owner={owner}', '-F', 'repo={repo}', '-f', `query=${query}`])
+  let r = await ask(QUERIES[0] as string)
+  if (r.exitCode !== 0) r = await ask(QUERIES[1] as string)
   let items: Issues['items'] = []
+  let total = 0
   try {
     if (r.exitCode === 0) {
-      items = JSON.parse(r.stdout).data.repository.issues.nodes.map((i: any) => ({
+      const list = JSON.parse(r.stdout).data.repository.issues
+      total = list.totalCount ?? list.nodes.length
+      items = list.nodes.map((i: any) => ({
         number: i.number,
         title: i.title,
         labels: i.labels.nodes.map((l: any) => l.name),
         parent: i.parent?.number ?? null,
-        blockedBy: i.blockedBy.nodes.filter((b: any) => b.state === 'OPEN').map((b: any) => b.number), // closed blockers no longer block
+        blockedBy: (i.blockedBy?.nodes ?? []).filter((b: any) => b.state === 'OPEN').map((b: any) => b.number), // closed blockers no longer block
       })).sort((a: any, b: any) => a.number - b.number) // newest last
     }
   } catch {}
-  await update($, issues, () => ({ isAvailable: r.exitCode === 0, items }))
+  await update($, issues, () => ({ isAvailable: r.exitCode === 0, total: Math.max(total, items.length), items }))
 }
 
 export const register: Register = on => {
@@ -220,7 +237,7 @@ export const register: Register = on => {
       description: 'Show branch, diffs, git graph and issues in a pane',
     })
     void $.ui.open({ id: PANE, title: 'Git' })
-    await refresh($)
+    await refresh($).catch(() => {})
     void refreshIssues($).catch(() => {})
 
     return next(e)
@@ -247,7 +264,8 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
-    await refresh($).catch(() => {})
+    // a read-only call changes no file
+    if (!ran.isReadOnly) await refresh($).catch(() => {})
 
     return ran
   })
@@ -261,7 +279,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    await refresh($)
+    await refresh($).catch(() => {})
     void refreshIssues($).catch(() => {})
 
     return next(e)
@@ -272,13 +290,7 @@ export const register: Register = on => {
     const g = await read($, info)
     const open = await read($, isGraphOpen)
     const isDiff = await read($, isDiffOpen)
-    const total = g.files.reduce(
-      (t, f) => {
-        const n = stats(parse(f.diff))
-        return { added: t.added + n.added, deleted: t.deleted + n.deleted }
-      },
-      { added: 0, deleted: 0 },
-    )
+    const total = g.files.reduce((t, f) => ({ added: t.added + (f.added ?? 0), deleted: t.deleted + (f.deleted ?? 0) }), { added: 0, deleted: 0 })
     const isUntracked = await read($, isUntrackedOpen)
     const closed = await read($, collapsed)
     const shown = await read($, preview)
@@ -291,13 +303,18 @@ export const register: Register = on => {
       return <Text dimColor>Not a git repository.</Text>
     }
 
-    const wanted = await read($, tab)
-    const selected = g.files.find(f => f.path === wanted) ?? g.files[0]
+    const selected = g.files.find(f => f.path === g.diff.path)
     const room = Math.max(3, (e.viewport?.rows ?? 30) - 12)
-    const all = selected ? parse(selected.diff) : []
+    const all = selected ? parse(g.diff.text) : []
     const rows = all.slice(0, room)
-    const { added, deleted } = stats(all)
-    const graphLines = g.graph.split('\n').slice(0, 15)
+    const allGraph = g.graph.split('\n').filter(Boolean)
+    const graphLines = allGraph.slice(0, 15)
+    // A tab shows the file's name; two files with the same name show their paths.
+    const label = (path: string) => {
+      const name = path.split('/').pop() as string
+      return g.files.filter(f => f.path.split('/').pop() === name).length > 1 ? path : name
+    }
+    const count = (n: number | null) => (n === null ? '?' : String(n))
 
     return (
       <Box flexDirection="column">
@@ -316,24 +333,26 @@ export const register: Register = on => {
         <Box flexDirection="column" borderStyle="round">
           {g.files.length === 0 && <Text dimColor>No changes.</Text>}
           <Box flexWrap="wrap">
-            {g.files.map(f => {
-              const n = stats(parse(f.diff))
-
-              return (
-                <Button key={f.path} onPress={() => update($, tab, () => f.path)}>
-                  {f === selected ? '▸ ' : ''}
-                  {f.status} {f.path.split('/').pop()}{' '}
-                  <Text color="green">+{n.added}</Text>{' '}
-                  <Text color="red">-{n.deleted}</Text>
-                </Button>
-              )
-            })}
+            {g.files.map(f => (
+              <Button
+                key={f.path}
+                onPress={async () => {
+                  await update($, tab, () => f.path)
+                  await refresh($).catch(() => {})
+                }}
+              >
+                {f === selected ? '▸ ' : ''}
+                {f.status} {label(f.path)}{' '}
+                <Text color="green">+{count(f.added)}</Text>{' '}
+                <Text color="red">-{count(f.deleted)}</Text>
+              </Button>
+            ))}
           </Box>
           {/* shortcut: viewport.columns is the whole conversation, not the pane; fixed width, upgrade if the pane width becomes readable */}
           {selected && (
             <Text>
-              <Text color="green">+{added} added</Text>{'  '}
-              <Text color="red">-{deleted} deleted</Text>
+              <Text color="green">+{count(selected.added)} added</Text>{'  '}
+              <Text color="red">-{count(selected.deleted)} deleted</Text>
             </Text>
           )}
           <Text dimColor wrap="truncate">{'─'.repeat(24)}</Text>
@@ -350,6 +369,7 @@ export const register: Register = on => {
               </Text>
             ),
           )}
+          {all.length > room && <Text dimColor>{more(all.length - room)}</Text>}
         </Box>
         )}
         <Text> </Text>
@@ -393,13 +413,14 @@ export const register: Register = on => {
             <Text dimColor wrap="truncate">{'─'.repeat(24)}</Text>
             {shown.text
               .split('\n')
-              .slice(0, Math.max(3, (e.viewport?.rows ?? 30) - 12))
+              .slice(0, room)
               .map((l, i) => (
                 <Text>
                   <Text dimColor>{String(i + 1).padStart(4)} </Text>
                   {l}
                 </Text>
               ))}
+            {shown.text.split('\n').length > room && <Text dimColor>{more(shown.text.split('\n').length - room)}</Text>}
           </Box>
         )}
         <Text> </Text>
@@ -414,13 +435,14 @@ export const register: Register = on => {
             {graphLines.map(l => (
               <Text>{graphParts(l).map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
             ))}
+            {allGraph.length > graphLines.length && <Text dimColor>{more(allGraph.length - graphLines.length)}</Text>}
           </Box>
         )}
         <Text> </Text>
         <Button
           key="issues"
           plain
-          label={`${isIssues ? '▾' : '▸'} Issues (${gh.items.length})`}
+          label={`${isIssues ? '▾' : '▸'} Issues (${gh.items.length}${gh.total > gh.items.length ? ` of ${gh.total}` : ''})`}
           onPress={() => update($, isIssuesOpen, v => !v)}
         />
         {isIssues && !gh.isAvailable && <Text dimColor>{'  '}gh unavailable or no GitHub remote.</Text>}
