@@ -341,16 +341,77 @@ test('/monitor-clear empties plan and agents', async ($, on) => {
   await ui.unmount()
 })
 
-test('PostToolUse reads the transcript into Main tokens, model and cost', async ($, on) => {
-  const line = JSON.stringify({ message: { id: 'msg_1', model: 'claude-sonnet-4', usage: { input_tokens: 1000, output_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } })
-  on('fs.read', () => ({ value: `${line}\n${line}\n` }) as any)
+const usage = (input: number, model = 'claude-sonnet-5-5') => JSON.stringify({ type: 'assistant', message: { id: `msg_${input}`, model, usage: { input_tokens: input, output_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } })
+// A background agent's notification: a usage with no token counts.
+const ATTACHMENT = JSON.stringify({ type: 'attachment', attachment: { usage: { totalTokens: 58249, toolUses: 9 } } })
+
+test('PostToolUse shows Main tokens and model from the transcript, and the engine\'s cost in the header', async ($, on) => {
+  on('fs.read', () => ({ value: `${usage(500)}\n${usage(1000)}\n${ATTACHMENT}\n` }) as any)
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1, window: 1 }, rateLimits: [], cost: { usd: 0.42 } } }) as any)
   on('classic.PostToolUse', () => ({}) as any)
 
   await $.classic.PostToolUse({ tool_name: 'Bash', tool_input: {}, tool_response: {}, tool_use_id: 't', transcript_path: '/x/s.jsonl' } as any)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  // 1000 in at $3/M + 1000 out at $15/M = $0.018, counted once for the repeated id.
-  expect((await texts(ui)).some(x => /Main · claude-sonnet-4 · 2.0k tok$/.test(x))).toBe(true)
+  const t = await texts(ui)
+  // The attachment comes last but does not zero the size: the last real response is 1000 in + 1000 out.
+  expect(t.some(x => /Main · claude-sonnet-5-5 · 2.0k tok$/.test(x))).toBe(true)
+  expect(t.some(x => /Agents \(0 running\) · run ~\$0\.420/.test(x))).toBe(true)
+  await ui.unmount()
+})
+
+test('a transcript too big to read falls back to the engine\'s context size for Main', async ($, on) => {
+  on('fs.read', () => { throw new Error('over 4 MiB') })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 150000, window: 1000000 }, rateLimits: [], cost: { usd: 3 } } }) as any)
+  on('classic.PostToolUse', () => ({}) as any)
+
+  await $.classic.PostToolUse({ tool_name: 'Bash', tool_input: {}, tool_response: {}, tool_use_id: 't', transcript_path: '/x/s.jsonl' } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await texts(ui)).some(x => /Main · 150k tok$/.test(x))).toBe(true)
+  await ui.unmount()
+})
+
+test('the final reply is read on Stop for Main and on SubagentStop for an agent', async ($, on) => {
+  const files: Record<string, string> = { '/x/s.jsonl': usage(3000, 'claude-opus-5-5'), '/x/a1.jsonl': usage(7000, 'claude-haiku-5-5') }
+  on('fs.read', (_, e) => ({ value: files[(e as any).path] ?? '' }) as any)
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: [] } }) as any)
+  on('agent.spawn', () => ({ model: 'haiku' }) as any)
+  on('classic.SubagentStart', () => ({}) as any)
+  on('classic.SubagentStop', () => ({}) as any)
+  on('classic.Stop', () => ({}) as any)
+  await $.agent.spawn(spawn({ name: 'Zed' }))
+  await $.classic.SubagentStart({ agent_id: 'a1', agent_type: 'general-purpose' } as any)
+
+  await $.classic.SubagentStop({ agent_id: 'a1', agent_type: 'general-purpose', agent_transcript_path: '/x/a1.jsonl', stop_hook_active: false } as any)
+  await $.classic.Stop({ transcript_path: '/x/s.jsonl', stop_hook_active: false } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const t = await texts(ui)
+  expect(t.some(x => /Main · claude-opus-5-5 · 4.0k tok/.test(x))).toBe(true)
+  expect(t.some(x => /Zed · claude-haiku-5-5 · 8.0k tok/.test(x))).toBe(true)
+  await ui.unmount()
+})
+
+test('a kill whose TaskStop fails leaves the agent running', async ($, on) => {
+  on('tool.call', (_, e) => (e.tool === 'TaskStop' ? { result: 'no such task', isError: true } : { result: {} }) as any)
+  on('agent.spawn', () => ({ model: 'opus' }) as any)
+  on('classic.SubagentStart', () => ({}) as any)
+  await $.agent.spawn(spawn({ name: 'Zed' }))
+  await $.classic.SubagentStart({ agent_id: 'a1', agent_type: 'general-purpose' } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'kill-tu1' })
+  expect((await texts(ui)).some(x => /Agents \(1 running\)/.test(x))).toBe(true)
+  await ui.unmount()
+})
+
+test('a skill Main loads shows under Main', async ($, on) => {
+  on('tool.call', () => ({ result: {} }) as any)
+  await $.tool.call({ tool: 'Skill', skill: 'tdd' } as any)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await texts(ui)).some(x => /◇ tdd/.test(x))).toBe(true)
   await ui.unmount()
 })
 

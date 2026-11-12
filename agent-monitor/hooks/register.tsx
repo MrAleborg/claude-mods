@@ -81,41 +81,36 @@ const claimed = (plan: Step[], runs: AgentRun[], prev: string[] = []) => {
   return [...prev, ...now.filter(c => !prev.includes(c))].slice(-30)
 }
 
-// USD per million tokens (input, output) by model family; cache reads cost 0.1x input, cache writes 1.25x.
-// shortcut: assumed list prices matched by name, not read from the engine; check them against your plan and edit here.
-const RATES: [RegExp, number, number][] = [[/opus/i, 15, 75], [/sonnet|fable/i, 3, 15], [/haiku/i, 1, 5]]
-
-// An agent's session: size (the last response's tokens), model, and estimated cost (every response, priced by its own model), from its transcript.
-// shortcut: a transcript over 4 MiB cannot be read, so its values stay at the last read; messages are told apart by id, so a repeated line counts once.
-const sessionOf = async ($: any, path: string): Promise<{ tokens: number; model?: string; cost: number } | undefined> => {
+// An agent's size (the last response's tokens) and model, from its transcript; the cost comes from the engine's ledger.
+// shortcut: a transcript over 4 MiB cannot be read, so a subagent's values stay at the last read; Main falls back to the engine's context figure.
+const sessionOf = async ($: any, path: string): Promise<{ tokens: number; model?: string } | undefined> => {
   try {
-    const text: string = await $.fs.read(path)
-    const seen = new Set<string>()
-    let tokens = 0
-    let model: string | undefined
-    let cost = 0
-    for (const line of text.split('\n')) {
+    const lines: string[] = (await $.fs.read(path)).split('\n')
+    // The last line with token counts: attachment and synthetic lines carry a usage without any, and must not zero the size.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i] as string
       const at = line.indexOf('"usage":{')
       if (at < 0) continue
-      const id = /"id":"(msg_[^"]+)"/.exec(line)?.[1]
-      if (id) {
-        if (seen.has(id)) continue
-        seen.add(id)
-      }
       const u = line.slice(at, at + 400)
       const n = (k: string) => Number(new RegExp(`"${k}":(\\d+)`).exec(u)?.[1] ?? 0)
-      const m = /"model":"([^"]+)"/.exec(line)?.[1]
-      const [inp, out, w, r] = [n('input_tokens'), n('output_tokens'), n('cache_creation_input_tokens'), n('cache_read_input_tokens')]
-      const [, pin, pout] = RATES.find(([re]) => m && re.test(m)) ?? [, 0, 0]
-      cost += ((inp + 1.25 * w + 0.1 * r) * pin + out * pout) / 1e6
-      tokens = inp + w + r + out
-      model = m ?? model
+      const tokens = n('input_tokens') + n('output_tokens') + n('cache_creation_input_tokens') + n('cache_read_input_tokens')
+      if (tokens) return { tokens, model: /"model":"([^"]+)"/.exec(line)?.[1] }
     }
+  } catch {}
+  return undefined
+}
 
-    return tokens ? { tokens, model, cost } : undefined
-  } catch {
-    return undefined
+// Re-reads one agent's transcript (Main's when agentId is absent) and the session's cost, as /cost totals it.
+const refresh = async ($: any, agentId: string | undefined, path: string, effort?: string) => {
+  const ses = await sessionOf($, path)
+  const usage = await $.session.usage().catch(() => undefined)
+  if (agentId) {
+    if (ses || effort) await update($, agents, list => list.map(a => (a.agentId === agentId ? { ...a, ...ses, effort: effort ?? a.effort } : a)))
+  } else {
+    const tokens = ses?.tokens ?? usage?.context?.tokens
+    await update($, main, m => ({ ...m, ...ses, ...(tokens ? { tokens } : {}), effort: effort ?? m.effort }))
   }
+  if (usage?.cost) await update($, main, m => ({ ...m, usd: usage.cost.usd }))
 }
 const usd = (n: number) => `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`
 const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
@@ -245,6 +240,7 @@ export const register: Register = on => {
     const skill = e.tool === 'Skill' ? String((e as unknown as { skill?: string }).skill ?? '') : ''
     if (skill) {
       if (e.agentId) await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, skills: addSkill(a.skills, skill) } : a)))
+      else await update($, main, m => ({ ...m, skills: addSkill(m.skills, skill) }))
     }
 
     if (!e.agentId) {
@@ -286,12 +282,14 @@ export const register: Register = on => {
   // The classic events carry the transcript path; a subagent's lives beside the session's, under subagents/.
   on('classic.PostToolUse', async ($, e, next) => {
     const path = e.agent_id ? `${e.transcript_path.replace(/\.jsonl$/, '')}/subagents/agent-${e.agent_id}.jsonl` : e.transcript_path
-    const effort = e.effort?.level
-    const ses = await sessionOf($, path)
-    if (ses || effort) {
-      if (e.agent_id) await update($, agents, list => list.map(a => (a.agentId === e.agent_id ? { ...a, ...ses, effort: effort ?? a.effort } : a)))
-      else await update($, main, m => ({ ...m, ...ses, effort: effort ?? m.effort }))
-    }
+    await refresh($, e.agent_id, path, e.effort?.level)
+
+    return next(e)
+  })
+
+  // The final reply of a turn comes after its last tool call, so it is read when the turn stops.
+  on('classic.Stop', async ($, e, next) => {
+    await refresh($, undefined, e.transcript_path, e.effort?.level)
 
     return next(e)
   })
@@ -313,6 +311,7 @@ export const register: Register = on => {
   })
 
   on('classic.SubagentStop', async ($, e, next) => {
+    await refresh($, e.agent_id, e.agent_transcript_path, e.effort?.level)
     await update($, agents, list => list.map(a => (a.agentId === e.agent_id ? { ...a, isDone: true } : a)))
     // shortcut: a finished agent completes its step once no other agent still works on it; success is not checked.
     const list = await read($, agents)
@@ -387,15 +386,16 @@ export const register: Register = on => {
 
     const setState = (a: AgentRun, state?: 'paused' | 'killed') =>
       update($, agents, l => l.map(x => (x.id === a.id ? { ...x, state } : x)))
+    // Marked killed before the stop, so the SubagentStop it raises does not complete the agent's step; undone if the stop fails.
     const kill = async (a: AgentRun) => {
-      await setState(a, 'killed')
-      await update($, agents, l => l.map(x => (x.id === a.id ? { ...x, isDone: true } : x)))
-      await $.tool.call({ tool: 'TaskStop', task_id: a.agentId })
+      await update($, agents, l => l.map(x => (x.id === a.id ? { ...x, state: 'killed' as const, isDone: true } : x)))
+      const out = (await $.tool.call({ tool: 'TaskStop', task_id: a.agentId })) as { deny?: string; isError?: boolean }
+      if (out.deny || out.isError) await update($, agents, l => l.map(x => (x.id === a.id ? { ...x, state: undefined, isDone: false } : x)))
     }
     // running blue, paused yellow, done green, killed gray
     const toneOf = (a: AgentRun) => (a.id === 'main' ? (a.doing ? 'blue' : 'gray') : a.state === 'killed' ? 'gray' : a.state === 'paused' ? 'yellow' : a.isDone ? 'green' : 'blue')
     const mainState = await read($, main)
-    const mainRun: AgentRun = { id: 'main', name: 'Main', doing: mainState.doing, tokens: mainState.tokens, cost: mainState.cost, effort: mainState.effort, model: mainState.model, isDone: false }
+    const mainRun: AgentRun = { id: 'main', name: 'Main', doing: mainState.doing, tokens: mainState.tokens, skills: mainState.skills, effort: mainState.effort, model: mainState.model, isDone: false }
     // A step an agent ever owned (running or done) is listed under that agent alone.
     // Only leaf steps: a step remembered before it had substeps is a parent now.
     const leafSteps = new Set(treeOf(plan).flatMap(flat).filter(n => !n.kids.length).map(n => n.step.content))
@@ -466,7 +466,7 @@ export const register: Register = on => {
       ...(plan.length === 0 ? [<Text wrap="truncate-end" dimColor>  no todo list yet</Text>] : []),
       ...treeOf(plan).flatMap((n, i) => node(n, String(i), 0)),
     ]
-    const total = (mainState.cost ?? 0) + runs.reduce((t, a) => t + (a.cost ?? 0), 0)
+    const total = mainState.usd ?? 0
     const agentLines: unknown[] = row(mainRun, 0)
     lens.plan = planLines.length
     lens.agents = agentLines.length
