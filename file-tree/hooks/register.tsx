@@ -13,6 +13,10 @@ const files = atom({ plugin: 'file-tree', key: 'files' } as const, [], {
 const expanded = atom({ plugin: 'file-tree', key: 'expanded' } as const, [], {
   shape: 'expanded-1',
 })
+// How many files git listed, so the pane can say what the cap left out.
+const total = atom({ plugin: 'file-tree', key: 'total' } as const, 0, {
+  shape: 'total-1',
+})
 const none: Edit = { path: '', saved: '', draft: '' }
 const edit = atom({ plugin: 'file-tree', key: 'edit' } as const, none, {
   shape: 'edit-1',
@@ -51,9 +55,13 @@ const tree = (paths: string[], open: string[]): TreeRow[] => {
 const refresh = async ($: any) => {
   // shortcut: git lists tracked + untracked-not-ignored files, so a project outside git shows nothing
   // -z: names come unquoted, so a non-ASCII one is not escaped
-  const r = await $.process.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'])
-  const list = r.exitCode === 0 ? r.stdout.split('\0').filter(Boolean) : []
-  await update($, files, () => [...new Set<string>(list)].slice(0, MAX_FILES))
+  const git = (...args: string[]) => $.process.run(['git', 'ls-files', ...args, '-z'])
+  const r = await git('--cached', '--others', '--exclude-standard')
+  // --cached still lists a tracked file deleted from disk, which cannot be opened
+  const gone = new Set<string>(r.exitCode === 0 ? (await git('--deleted')).stdout.split('\0') : [])
+  const list = r.exitCode === 0 ? [...new Set<string>(r.stdout.split('\0'))].filter(p => p && !gone.has(p)) : []
+  await update($, files, () => list.slice(0, MAX_FILES))
+  await update($, total, () => list.length)
 }
 
 export const register: Register = on => {
@@ -87,7 +95,8 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
-    await refresh($).catch(() => {})
+    // a read-only call changes no file
+    if (!ran.isReadOnly) await refresh($).catch(() => {})
 
     return ran
   })
@@ -97,6 +106,7 @@ export const register: Register = on => {
     const open = await read($, expanded)
     const current = await read($, edit)
     const rows = tree(await read($, files), open)
+    const hidden = (await read($, total)) - MAX_FILES
 
     return (
       <Box flexDirection="column">
@@ -124,22 +134,48 @@ export const register: Register = on => {
                   $.ui.toast(`${r.path}: not editable (binary or over 4 MiB)`)
                   return
                 }
-                await update($, edit, () => ({ path: r.path, saved: raw, draft: raw }))
+                // Reopening the file the editor left unsaved keeps those edits; opening another drops them, said aloud.
+                const cur = await read($, edit)
+                const kept = cur.path === r.path && cur.draft !== cur.saved
+                if (cur.path && cur.path !== r.path && cur.draft !== cur.saved) $.ui.toast(`Unsaved edits to ${cur.path} discarded`)
+                await update($, edit, () => (kept ? { ...cur, saved: raw } : { path: r.path, saved: raw, draft: raw }))
                 await $.ui.open({ id: EDITOR, title: r.name, focus: true, closeOnEscape: true })
               }}
             />
           ),
         )}
+        {hidden > 0 && <Text dimColor>… {hidden} more files not shown</Text>}
       </Box>
     )
   })
 
   on('ui.message', async ($, e, next) => {
     const d = e.data as { type?: string; text?: string }
-    if (d?.type !== 'save' || typeof d.text !== 'string') return next(e)
-
+    if (e.requestId !== EDITOR || typeof d?.text !== 'string') return next(e)
+    const text = d.text
     const cur = await read($, edit)
-    await $.fs.write(cur.path, d.text)
+    if (!cur.path) return {}
+
+    // The editor posts its text on every change, so closing it (Esc) keeps the edits for the next open of the file.
+    if (d.type === 'draft') {
+      await update($, edit, c => (c.path === cur.path ? { ...c, draft: text } : c))
+      return {}
+    }
+    if (d.type !== 'save') return next(e)
+
+    // The file may have changed since it was opened (Claude edited it): warn instead of overwriting; a second save overwrites.
+    const now = await $.fs.read(cur.path).catch(() => null)
+    if (now !== null && now !== cur.saved) {
+      await update($, edit, c => ({ ...c, saved: now, draft: text }))
+      $.ui.toast(`${cur.path} changed on disk since you opened it. Save again to overwrite it.`)
+      return {}
+    }
+    try {
+      await $.fs.write(cur.path, text)
+    } catch (err) {
+      $.ui.toast(`Could not save ${cur.path}: ${(err as Error).message}`)
+      return {}
+    }
     await update($, edit, () => none)
     await $.ui.close({ id: EDITOR })
     $.ui.toast(`Saved ${cur.path}`)
@@ -175,7 +211,7 @@ export const register: Register = on => {
         <Client
           key={`ed:${cur.path}`}
           module="./editor.tsx"
-          props={{ text: cur.saved }}
+          props={{ text: cur.draft, saved: cur.saved }}
           height={Math.max(5, (e.viewport?.rows ?? 30) - 6)}
         />
       </Box>

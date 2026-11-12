@@ -5,6 +5,7 @@ declare module 'claude-code' {
     'file-tree': {
       files: Shaped<string[]>
       expanded: Shaped<string[]>
+      total: Shaped<number>
       edit: Shaped<Edit>
     }
   }

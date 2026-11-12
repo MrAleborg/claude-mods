@@ -516,3 +516,20 @@ test('/clear empties the plan', async ($, on) => {
   expect(t.some(x => /no todo list yet/.test(x))).toBe(true)
   await ui.unmount()
 })
+
+test('a transcript whose size has not changed is not read again', async ($, on) => {
+  let reads = 0
+  on('fs.read', () => (reads++, { value: `${usage(1000)}\n` }) as any)
+  on('fs.stat', () => ({ value: { kind: 'file', size: 123, mtimeMs: 0, isLink: false } }) as any)
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: [] } }) as any)
+  on('classic.PostToolUse', () => ({}) as any)
+  const post = () => $.classic.PostToolUse({ tool_name: 'Bash', tool_input: {}, tool_response: {}, tool_use_id: 't', transcript_path: '/x/same.jsonl' } as any)
+
+  await post()
+  await post()
+
+  expect(reads).toBe(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await texts(ui)).some(x => /Main · claude-sonnet-5-5 · 2.0k tok/.test(x))).toBe(true)
+  await ui.unmount()
+})

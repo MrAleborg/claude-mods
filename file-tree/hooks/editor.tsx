@@ -1,13 +1,16 @@
 import type { ClientModule } from 'claude-code'
 
-type Props = { text: string }
+// text: what to edit (an unsaved draft, or the file); saved: the file as on disk, for the unsaved mark.
+type Props = { text: string; saved: string }
 type State = { lines: string[]; row: number; col: number; top: number }
 
 // A small line editor: arrows, Enter (one new line), Backspace/Delete, ctrl+s posts the text.
 // shortcut: no selection, undo or wide-character handling; upgrade if real editing is needed.
 const Editor: ClientModule<Props, State> = (props, surface) => {
   const { Box, Text } = surface.elements
-  const view = Math.max(1, surface.rows - 1)
+  // surface is the same object on every call, so its rows stay current after a resize
+  const rows = () => Math.max(1, surface.rows - 1)
+  const view = rows()
 
   if (surface.state === undefined) {
     surface.onKey(k => {
@@ -17,6 +20,7 @@ const Editor: ClientModule<Props, State> = (props, surface) => {
         surface.post({ type: 'save', text: s.lines.join('\n') })
         return
       }
+      const view = rows()
       const lines = [...s.lines]
       let { row, col } = s
       const line = lines[row]
@@ -67,6 +71,8 @@ const Editor: ClientModule<Props, State> = (props, surface) => {
       col = Math.min(col, lines[row].length)
       const top = row < s.top ? row : row >= s.top + view ? row - view + 1 : s.top
       surface.setState({ lines, row, col, top })
+      const text = lines.join('\n')
+      if (text !== s.lines.join('\n')) surface.post({ type: 'draft', text })
     })
     surface.setState({ lines: props.text.split('\n'), row: 0, col: 0, top: 0 })
 
@@ -74,7 +80,7 @@ const Editor: ClientModule<Props, State> = (props, surface) => {
   }
 
   const { lines, row, col, top } = surface.state
-  const isDirty = lines.join('\n') !== props.text
+  const isDirty = lines.join('\n') !== props.saved
 
   return (
     <Box flexDirection="column">

@@ -16,10 +16,11 @@ const SURFACES = ['terminal', 'desktop'] as const
 // As git prints a name without -z: one with non-ASCII bytes quoted, each such byte in octal.
 const quote = (p: string) =>
   /[^\x00-\x7f]/.test(p) ? `"${[...new TextEncoder().encode(p)].map(b => (b > 127 ? `\\${b.toString(8)}` : String.fromCharCode(b))).join('')}"` : p
-const world = (on: any, paths: string[] | null, disk: Record<string, string> = {}) => {
+const world = (on: any, paths: string[] | null, disk: Record<string, string> = {}, deleted: string[] = []) => {
   const log = { argv: [] as string[][], opened: [] as string[], closed: [] as string[], toasts: [] as string[] }
   on('process.run', (_: any, e: any) => {
     log.argv.push([...e.argv])
+    if (paths && e.argv.includes('--deleted')) return { value: { exitCode: 0, stdout: deleted.map(x => x + '\0').join(''), stderr: '' } }
     return { value: paths ? { exitCode: 0, stdout: e.argv.includes('-z') ? paths.map(x => x + '\0').join('') : paths.map(quote).join('\n') + '\n', stderr: '' } : { exitCode: 128, stdout: '', stderr: 'not a git repository' } }
   })
   // $.fs resolves a relative path against the project folder; the disk is keyed relative.
@@ -140,6 +141,75 @@ test('on a surface without Client (vscode) the editor pane shows more than the p
   await tree.press({ key: 'file:a.ts' })
   const ed = await $.ui.mount({ ...EDITOR, surface: 'vscode' })
   expect((await ed.findAll({ type: 'Text' })).length).toBeGreaterThan(1)
+  await ed.unmount()
+  await tree.unmount()
+})
+
+test('a tracked file deleted from disk is not listed', async ($, on) => {
+  world(on, ['a.ts', 'gone.ts'], {}, ['gone.ts'])
+  await start($)
+  const ui = await $.ui.mount({ ...TREE, surface: 'terminal' })
+  expect(await labels(ui)).toEqual(['  a.ts'])
+  await ui.unmount()
+})
+
+test('files past the cap are counted, not silently dropped', async ($, on) => {
+  world(on, Array.from({ length: 2003 }, (_, i) => `f${i}.ts`))
+  await start($)
+  const ui = await $.ui.mount({ ...TREE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /3 more files not shown/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a read-only tool call does not re-list the files', async ($, on) => {
+  const log = world(on, ['a.ts'])
+  on('tool.call', () => ({ result: {}, isReadOnly: true }))
+  await start($)
+  const before = log.argv.length
+  await $.tool.call({ tool: 'Read', file_path: 'a.ts' } as any)
+  expect(log.argv.length).toBe(before)
+})
+
+test('saving a file changed on disk since it was opened warns first, and a second save overwrites', async ($, on) => {
+  const disk = { 'a.txt': 'one' }
+  const log = world(on, ['a.txt'], disk)
+  await start($)
+  const tree = await $.ui.mount({ ...TREE, surface: 'terminal' })
+  await tree.press({ key: 'file:a.txt' })
+  const ed = await $.ui.mount({ ...EDITOR, surface: 'terminal' })
+  await ed.resize({ columns: 40, rows: 10, in: 'ed:a.txt' })
+  await ed.key({ key: 'x', in: 'ed:a.txt' })
+  disk['a.txt'] = 'Claude changed this'
+
+  await ed.key({ key: 's', ctrl: true, in: 'ed:a.txt' })
+  expect(disk['a.txt']).toBe('Claude changed this')
+  expect(log.toasts.at(-1)).toMatch(/changed on disk/)
+  expect(log.closed).not.toContain('file-editor')
+
+  await ed.key({ key: 's', ctrl: true, in: 'ed:a.txt' })
+  expect(disk['a.txt']).toBe('xone')
+  expect(log.toasts.at(-1)).toBe('Saved a.txt')
+  await ed.unmount()
+  await tree.unmount()
+})
+
+test('closing the editor keeps unsaved edits for the next open of the same file', async ($, on) => {
+  const disk = { 'a.txt': 'one' }
+  world(on, ['a.txt'], disk)
+  await start($)
+  const tree = await $.ui.mount({ ...TREE, surface: 'terminal' })
+  await tree.press({ key: 'file:a.txt' })
+  let ed = await $.ui.mount({ ...EDITOR, surface: 'terminal' })
+  await ed.resize({ columns: 40, rows: 10, in: 'ed:a.txt' })
+  await ed.key({ key: 'x', in: 'ed:a.txt' })
+  await ed.unmount()
+
+  await tree.press({ key: 'file:a.txt' })
+  ed = await $.ui.mount({ ...EDITOR, surface: 'terminal' })
+  await ed.resize({ columns: 40, rows: 10, in: 'ed:a.txt' })
+  expect(await ed.find({ type: 'Text', text: /unsaved/, in: 'ed:a.txt' })).toBeDefined()
+  await ed.key({ key: 's', ctrl: true, in: 'ed:a.txt' })
+  expect(disk['a.txt']).toBe('xone')
   await ed.unmount()
   await tree.unmount()
 })

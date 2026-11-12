@@ -31,7 +31,7 @@ const DIFF = [
 ].join('\n')
 
 const gql = (nodes: any[]) =>
-  JSON.stringify({ data: { repository: { issues: { nodes: nodes.map(n => ({ blockedBy: { nodes: [] }, ...n })) } } } })
+  JSON.stringify({ data: { repository: { issues: { totalCount: nodes.length, nodes: nodes.map(n => ({ blockedBy: { nodes: [] }, ...n })) } } } })
 
 // Answers each git command by its argv; `over` replaces a subcommand's answer.
 const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
@@ -39,11 +39,12 @@ const git = (on: any, over: Record<string, (argv: string[]) => any> = {}) => {
   on('process.run', (_: any, e: any) => {
     const argv = [...e.argv]
     calls.push(argv)
-    const key = argv[0] === 'gh' ? 'gh' : argv[1] === 'diff' && argv.includes('--name-status') ? 'names' : argv[1]
+    const key = argv[0] === 'gh' ? 'gh' : argv[1] === 'diff' && argv.includes('--name-status') ? 'names' : argv[1] === 'diff' && argv.includes('--numstat') ? 'numstat' : argv[1]
     if (over[key]) return { value: over[key](argv) }
     switch (key) {
       case 'rev-parse': return { value: ok('main\n') }
       case 'names': return { value: ok('M\0src/a.ts\0A\0b.txt\0') }
+      case 'numstat': return { value: ok('2\t1\tsrc/a.ts\0' + '1\t0\tb.txt\0') }
       case 'diff': return { value: ok(argv.at(-1) === ':(top)src/a.ts' ? DIFF : '@@ -0,0 +1 @@\n+new\n') }
       case 'ls-files': return { value: ok('notes/todo.md\0x.txt\0') }
       case 'log': return { value: ok('* abc123 (HEAD -> main) first\n') }
@@ -138,7 +139,7 @@ test('a non-ASCII path git quotes is diffed by its real name', async ($, on) => 
   // without -z, git prints this path quoted as "caf\303\251.txt"; with -z it is the raw name
   const calls = git(on, { names: () => ok('M\0café.txt\0') })
   await start($)
-  const diffs = calls.filter(c => c[1] === 'diff' && !c.includes('--name-status'))
+  const diffs = calls.filter(c => c[1] === 'diff' && !c.includes('--name-status') && !c.includes('--numstat'))
   expect(diffs.map(c => c.at(-1))).toEqual([':(top)café.txt'])
 })
 
@@ -271,4 +272,83 @@ test('a nested repository listed as "sub/" draws no nameless file row', async ($
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ key: 'file:sub/' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('one diff is loaded per refresh, the selected file\'s, and counts come from --numstat', async ($, on) => {
+  engine(on)
+  const calls = git(on, {
+    names: () => ok('M\0a\0M\0b\0M\0c\0M\0d\0'),
+    numstat: () => ok('5\t0\ta\0' + '1\t1\tb\0' + '-\t-\tc\0' + '0\t3\td\0'),
+  })
+  await start($)
+  const diffs = calls.filter(c => c[1] === 'diff' && !c.includes('--name-status') && !c.includes('--numstat'))
+  expect(diffs.map(c => c.at(-1))).toEqual([':(top)a'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'diff' }))?.text).toMatch(/4 files.*\+6.*-4/)
+  // a binary file has no line counts
+  expect((await ui.find({ key: 'c' }))?.text).toMatch(/M c \+\? -\?/)
+  await ui.press({ key: 'd' })
+  expect(calls.filter(c => c[1] === 'diff' && c.at(-1) === ':(top)d').length).toBe(1)
+  await ui.unmount()
+})
+
+test('a rename takes its counts from the new path', async ($, on) => {
+  engine(on)
+  git(on, { names: () => ok('R100\0old.ts\0new.ts\0'), numstat: () => ok('3\t2\t\0old.ts\0new.ts\0') })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'new.ts' }))?.text).toMatch(/R100 new\.ts \+3 -2/)
+  await ui.unmount()
+})
+
+test('two changed files with the same name show their paths', async ($, on) => {
+  engine(on)
+  git(on, { names: () => ok('M\0a/register.tsx\0M\0b/register.tsx\0M\0c.ts\0'), numstat: () => ok('') })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'a/register.tsx' }))?.text).toContain('a/register.tsx')
+  expect((await ui.find({ key: 'c.ts' }))?.text).toMatch(/M c\.ts/)
+  await ui.unmount()
+})
+
+test('a diff longer than the pane says how many lines are left out', async ($, on) => {
+  engine(on)
+  const long = ['@@ -1,0 +1,100 @@', ...Array.from({ length: 100 }, (_, i) => `+l${i}`)].join('\n')
+  git(on, { names: () => ok('M\0big.ts\0'), numstat: () => ok('100\t0\tbig.ts\0'), diff: () => ok(long) })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /… \d+ more lines/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the issue count says when more are open than were fetched', async ($, on) => {
+  engine(on)
+  git(on, { gh: () => ok(JSON.stringify({ data: { repository: { issues: { totalCount: 57, nodes: [{ number: 1, title: 'One', labels: { nodes: [] }, parent: null, blockedBy: { nodes: [] } }] } } } })) })
+  await $.command.run({ command: 'git-pane', args: '' } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ key: 'issues' }))?.text).toContain('Issues (1 of 57)')
+  await ui.unmount()
+})
+
+test('where GitHub refuses the sub-issue and blocker fields, the plain list still shows', async ($, on) => {
+  engine(on)
+  git(on, {
+    gh: argv => (argv.at(-1)?.includes('blockedBy')
+      ? fail()
+      : ok(JSON.stringify({ data: { repository: { issues: { totalCount: 1, nodes: [{ number: 4, title: 'Plain', labels: { nodes: [] } }] } } } }))),
+  })
+  await $.command.run({ command: 'git-pane', args: '' } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /#4 Plain/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a read-only tool call runs no git', async ($, on) => {
+  engine(on)
+  const calls = git(on)
+  on('tool.call', () => ({ result: {}, isReadOnly: true }))
+  await start($)
+  const before = calls.length
+  await $.tool.call({ tool: 'Read', file_path: 'a.ts' } as any)
+  expect(calls.length).toBe(before)
 })

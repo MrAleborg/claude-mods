@@ -83,7 +83,17 @@ const claimed = (plan: Step[], runs: AgentRun[], prev: string[] = []) => {
 
 // An agent's size (the last response's tokens) and model, from its transcript; the cost comes from the engine's ledger.
 // shortcut: a transcript over 4 MiB cannot be read, so a subagent's values stay at the last read; Main falls back to the engine's context figure.
+// A transcript only grows, so one whose size is unchanged since the last read answers from memory: no 4 MiB re-read per tool call.
+const lastRead = new Map<string, { size: number; ses?: { tokens: number; model?: string } }>()
 const sessionOf = async ($: any, path: string): Promise<{ tokens: number; model?: string } | undefined> => {
+  const size: number = await $.fs.stat(path).then((s: { size: number }) => s.size).catch(() => -1)
+  const hit = lastRead.get(path)
+  if (size >= 0 && hit?.size === size) return hit.ses
+  const ses = await readSession($, path)
+  if (size >= 0) lastRead.set(path, { size, ses })
+  return ses
+}
+const readSession = async ($: any, path: string): Promise<{ tokens: number; model?: string } | undefined> => {
   try {
     const lines: string[] = (await $.fs.read(path)).split('\n')
     // The last line with token counts: attachment and synthetic lines carry a usage without any, and must not zero the size.
